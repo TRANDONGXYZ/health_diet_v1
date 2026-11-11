@@ -36,6 +36,68 @@ The last is service-process age, not request execution time; comparing it before
 and after inactivity helps identify a restart. A small process age plus a large
 client wait outside server `total` is consistent with a platform cold start.
 
+### Live shared-fix measurements
+
+Commit `5cf230b` was pushed to `main` and verified live on the existing Ohio
+Render service. No SQL migration or plan upgrade was required.
+
+| Actual UI action | Before, warm samples | After, warm samples |
+| --- | --- | --- |
+| Add Week: Enter until week appears | 4.214 / 4.708 / 2.758 s | 1.183 / 1.273 / 1.214 s |
+| Name-only recipe: Save until confirmation | 3.135 / 4.047 / 4.117 s | 1.233 / 0.650 / 1.153 s |
+
+All new records were verified after a full reload. After-fix requests have no
+workspace load, no lock wait and one durable write. The recipe-save progress poll
+and both follow-up state requests are absent. Application CPU time was 6–19 ms;
+the remaining storage-header wait was 325–898 ms, with roughly another 300 ms
+outside the timed handler before the browser received the response. A fresh TLS
+connection in one sample took 46 ms; subsequent samples reused the connection.
+These measurements do not identify Render CPU as the normal-use bottleneck.
+
+Before the fix, the first operations after 960 seconds without test traffic took
+3.527 s (week) and 4.136 s (recipe). Their following warm repeats took
+3.286 / 2.129 s and 3.504 / 4.030 s respectively. No distinct cold-start penalty
+was apparent in that run. A post-fix idle run additionally records process age
+to distinguish an actual process restart from an app that remained awake.
+
+The operator reports Render **Ohio** and Supabase **ap-south-1**, which Supabase
+identifies as [Mumbai](https://supabase.com/docs/guides/platform/regions).
+The intercontinental route is a likely contributor to the measured upstream
+response wait, not a measured percentage of it. No Singapore-versus-Ohio or
+paid-versus-Free comparison was performed. Testing a Singapore Render service
+nearer the database is a more targeted next experiment than buying more Ohio
+CPU. Render [requires a new service to change regions](https://render.com/docs/regions);
+plan the anonymous-cookie/backup migration before replacing the existing URL.
+A paid Ohio service still has the same geographic route. An always-on service
+addresses [Free's idle sleep](https://render.com/docs/free), a separate issue
+from the normal-use request amplification fixed here.
+
+The completed post-fix 960-second test measured:
+
+| Action | First after test-page inactivity | Following warm repeats |
+| --- | --- | --- |
+| Add Week, Enter → visible | 1.462 s | 1.314 / 0.719 s |
+| Name-only Save → confirmation | 1.387 s | 0.677 / 1.231 s |
+
+The first POSTs reported process ages of 1,118,426 and 1,118,480 ms—about
+18.6 minutes. The process therefore did not restart during the sixteen-minute
+window. These first requests are **after test-page inactivity**, not verified
+platform cold starts. CPU time remained 7–18 ms; storage response wait was
+320–928 ms and there was no workspace or connection-pool queueing. The new week
+and recipe were verified again after reload. No measured result supports blaming
+the old five-second normal-use delay on Render's idle spin-up or CPU limit.
+
+These were small controlled samples in new anonymous workspaces, not a
+Singapore-versus-Ohio provider benchmark or a guarantee for every dataset. The
+remaining measured wait is principally upstream response plus client/network
+transit. Matching regions is a justified next experiment; a specific improvement
+cannot be promised without measuring that deployment.
+
+Raw local artifacts: `test-results/create-live-before.json`,
+`create-live-after.json`, `create-live-idle-before.json`,
+`create-live-idle-after.json`, `create-local-before.json`, and
+`create-local-after.json`.
+
 ```powershell
 node tests/measure_create_actions.cjs --local --output test-results/create-local.json
 node tests/measure_create_actions.cjs --url https://health-diet-v1.onrender.com --output test-results/create-live.json
