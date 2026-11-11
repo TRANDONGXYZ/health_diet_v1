@@ -21,7 +21,7 @@ function notify(message, error = false) {
   const node = $('#notification'); node.textContent = message; node.classList.toggle('error',error); node.hidden = false;
   clearTimeout(notifyTimer); notifyTimer = setTimeout(() => node.hidden = true, error ? 14000 : 6000);
 }
-async function work(label, callback) {
+async function work(label, callback, {pollAI=true}={}) {
   if (busy||planJobId) { notify('A task is already running. Wait or cancel AI generation.'); return; }
   busy = true; $('#busy-text').textContent = label; $('#busy-indicator').hidden = false;
   // A dialog is in the browser's top layer; include the progress message inside it too.
@@ -30,7 +30,7 @@ async function work(label, callback) {
   if (dialog) dialog.prepend(progress);
   const workStarted = Date.now();
   let polling = true, pollPending = false;
-  const progressTimer = setInterval(async () => {
+  const progressTimer = pollAI?setInterval(async () => {
     if (!polling || pollPending) return;
     pollPending = true;
     try {
@@ -43,7 +43,7 @@ async function work(label, callback) {
       if (!progress.dataset.persist) progress.textContent = message + ' — please wait…';
     } catch { /* Progress availability does not decide whether the main request succeeds. */ }
     finally { pollPending = false; }
-  }, 2000);
+  }, 2000):null;
   $$('button[type=submit], [data-action=generate], [data-action=import], [data-action=identify]').forEach(b => b.disabled = true);
   try { return await callback(); }
   catch (error) { notify(error.message,true); if (dialog?.open) { progress.textContent = error.message; progress.classList.add('danger'); progress.dataset.persist = 'true'; } }
@@ -171,10 +171,15 @@ async function openAddWeek(){
   $('#add-week-select').innerHTML=weeks.map(week=>`<option value="${week}">${weekRange(week)}</option>`).join('');$('#add-week-message').textContent='';open('#add-week-modal','#create-week');
 }
 async function createWeek(){
+  if(weekMutationPending)return;weekMutationPending=true;++refreshVersion;
   const button=$('#create-week');button.disabled=true;
-  try{await api('/api/plan/add',{week_start:$('#add-week-select').value,timezone_offset:new Date().getTimezoneOffset()});await refresh();closeDialog($('#add-week-modal'));notify('Week added with seven empty slots.');}
+  try{
+    const result=await api('/api/plan/add',{week_start:$('#add-week-select').value,timezone_offset:new Date().getTimezoneOffset()});
+    ++refreshVersion;state.plans=[...(state.plans||[]).filter(plan=>plan.week_start!==result.plan.week_start),result.plan];
+    renderWeek();closeDialog($('#add-week-modal'));notify('Week added with seven empty slots.');
+  }
   catch(error){$('#add-week-message').textContent=error.message;}
-  finally{button.disabled=false;if($('#add-week-modal').open)button.focus({preventScroll:true});}
+  finally{weekMutationPending=false;button.disabled=false;if($('#add-week-modal').open)button.focus({preventScroll:true});}
 }
 function showMeal(week,index) {
   const plan=(state.plans||[]).find(p=>p.week_start===week);const day=plan?.days[index];if(!day)return;
@@ -487,7 +492,16 @@ document.addEventListener('click', async event => {
 });
 $('#recipe-form').addEventListener('submit',async event => {
   event.preventDefault();
-  await work('Saving recipe and checking calorie values',async () => { const result = await api('/api/recipes',readRecipe()); await refresh(); closeDialog($('#recipe-modal')); tab('dishes'); notify(result.warnings.length ? 'Recipe saved. Some estimates are unavailable: '+result.warnings.join(' ') : 'Recipe saved.'); });
+  await work('Saving recipe and checking calorie values',async () => {
+    ++refreshVersion;const result=await api('/api/recipes',readRecipe());++refreshVersion;
+    const recipe={...result.recipe,calories:result.calories},index=state.recipes.findIndex(item=>item.id===recipe.id);
+    if(index<0)state.recipes.push(recipe);else state.recipes[index]=recipe;
+    if(result.foods)state.foods=result.foods;
+    $('#dish-count').textContent=state.recipes.length;$('#food-count').textContent=`${state.foods.length} food references`;
+    $('#food-options').innerHTML=state.foods.map(food=>`<option value="${esc(food.name)}">${esc(food.name)} · ${esc(food.aliases?.join(', '))}</option>`).join('');
+    renderDishes();renderWeek();closeDialog($('#recipe-modal'));tab('dishes');
+    notify(result.warnings.length?'Recipe saved. Some estimates are unavailable: '+result.warnings.join(' '):'Recipe saved.');
+  },{pollAI:false});
 });
 $('#recipe-form').addEventListener('input',event=>{updateCalories();if(event.target.name==='source_text'){clearTimeout(languageTimer);languageTimer=setTimeout(showSourceLanguage,250);}});
 $('#recipe-form').addEventListener('change',event => { if (event.target.matches('.name-input')) resolveIngredient(event.target.value.trim()); });

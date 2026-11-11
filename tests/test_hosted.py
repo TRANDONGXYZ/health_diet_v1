@@ -166,8 +166,8 @@ class HostedHTTPTests(unittest.TestCase):
         # Exercise the real HTTP adapter, rather than mocking remote's final result.
         secret='provider-body-must-stay-private'
         response={'error_code':'anonymous_provider_disabled','msg':secret}
-        error=urllib.error.HTTPError('https://project.supabase.co/auth/v1/signup',422,'Unprocessable Entity',{},io.BytesIO(json.dumps(response).encode()))
-        with patch.object(hosted.urllib.request,'urlopen',side_effect=error),self.assertLogs(hosted.LOG,level='WARNING') as logs:
+        from mealapp import supabase_http
+        with patch.object(supabase_http,'request',return_value=(422,json.dumps(response).encode())),self.assertLogs(hosted.LOG,level='WARNING') as logs:
             # The HTTP client above also uses urllib: call the real adapter directly
             # here, then send its sanitized exception through the app's HTTP flow.
             with self.assertRaises(hosted.HostedServiceError) as raised:
@@ -213,6 +213,51 @@ class HostedHTTPTests(unittest.TestCase):
         with patch.object(hosted,'remote',side_effect=remote):
             self.assertEqual(self.http('/api/plan/delete',{'week_start':week},cookie=cookie,csrf=token)[0],200)
         self.assertFalse(any(plan['week_start']==week for plan in self.http('/api/state',cookie=cookie)[1]['plans']))
+
+    def test_cached_manual_mutations_only_write_once_and_telemetry_never_loads_storage(self):
+        cookie,token=self.create_tester()
+        hosted.remote.reset_mock()
+        code,body,_=self.http('/api/recipes',{'id':'cached','name':'Cached soup','ingredients':[]},cookie=cookie,csrf=token)
+        self.assertEqual(code,200,body)
+        self.assertEqual([call.args[0] for call in hosted.remote.call_args_list],['/rest/v1/rpc/health_beta_save'])
+        self.assertTrue(body['foods'])
+        hosted.remote.reset_mock()
+        for route in ('/api/status','/api/ai-progress'):
+            self.assertEqual(self.http(route,cookie=cookie)[0],200)
+        self.assertEqual(hosted.remote.call_count,0)
+        self.assertEqual(self.http('/api/state',cookie=cookie)[1]['recipes'][0]['name'],'Cached soup')
+
+    def test_stale_cached_mutation_cannot_overwrite_another_committed_revision(self):
+        cookie,token=self.create_tester()
+        session=next(iter(hosted.SESSIONS.values()));row=self.upstream.rows[session.uid]
+        external=app.clean_recipe({'id':'external','name':'Another committed recipe','ingredients':[]})
+        row['document']['tables']['recipes'].append({'id':'external','body':external});row['revision']+=1
+        committed=copy.deepcopy(row)
+        recipe={'id':'retry','name':'My new recipe','ingredients':[]}
+        self.assertEqual(self.http('/api/recipes',recipe,cookie=cookie,csrf=token)[0],503)
+        self.assertEqual(self.upstream.rows[session.uid],committed)
+        self.assertFalse(session.cache_valid)
+        self.assertEqual(self.http('/api/recipes',recipe,cookie=cookie,csrf=token)[0],200)
+        saved=self.http('/api/state',cookie=cookie)[1]['recipes']
+        self.assertEqual({r['id'] for r in saved},{'external','retry'})
+
+    def test_images_load_on_demand_and_complete_backup_survives_cache_restart(self):
+        cookie,token=self.create_tester()
+        self.http('/api/dish-photo',{'filename':'photo.png','image':base64.b64encode(png()).decode()},cookie=cookie,csrf=token)
+        self.sessions+=list(hosted.SESSIONS.values());hosted.SESSIONS.clear()
+        hosted.remote.reset_mock()
+        self.assertEqual(self.http('/api/state',cookie=cookie)[0],200)
+        session=next(iter(hosted.SESSIONS.values()))
+        self.assertFalse(list((session.path/'photos').glob('*.png')))
+        self.assertFalse(any('/storage/' in call.args[0] for call in hosted.remote.call_args_list))
+        hosted.remote.reset_mock()
+        self.assertEqual(self.http('/api/recipes',{'name':'Without photo','ingredients':[]},cookie=cookie,csrf=token)[0],200)
+        self.assertFalse(any('/storage/' in call.args[0] for call in hosted.remote.call_args_list))
+        code,archive,_=self.http('/api/backup/export',cookie=cookie)
+        self.assertEqual(code,200)
+        manifest,images=backups.read_zip(archive)
+        self.assertEqual(len(images),1);self.assertEqual(next(iter(images.values())),png())
+        self.assertEqual(len(manifest['tables']['recipes']),1)
 
     def test_async_jobs_and_progress_belong_only_to_their_tester(self):
         a,ta=self.create_tester();b,tb=self.create_tester()

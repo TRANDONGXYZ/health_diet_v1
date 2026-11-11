@@ -203,6 +203,11 @@ def config():
 
 def status():
     from . import hosted
+    if hosted.enabled():
+        from . import groq_ai
+        ready=bool(os.environ.get('GROQ_API_KEY'))
+        return {'provider':'groq','connected':ready,'models':[groq_ai.TEXT_MODEL],
+                'text_ready':ready,'vision_ready':ready,'vietnamese_ready':ready,'english_ready':ready}
     values = config()
     if hosted.enabled() or os.environ.get('AI_PROVIDER')=='groq':
         ready=bool(os.environ.get('GROQ_API_KEY'))

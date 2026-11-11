@@ -1,6 +1,6 @@
 """Render beta: anonymous Supabase identity and durable per-tester workspaces.
 
-SQLite and photo files are request-local working copies. Supabase Postgres is
+SQLite and photo files are cached per-tester working copies. Supabase Postgres is
 the authority; successful writes are acknowledged only after a revision-checked
 commit there. Storage objects are private and use the tester's JWT, never an
 administrative key.
@@ -10,6 +10,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import hashlib
 import hmac
+import http.client
 from http.cookies import SimpleCookie
 import json
 import logging
@@ -35,6 +36,7 @@ IMAGE = re.compile(r'[a-f0-9]{64}\.png\Z')
 MAX_DOCUMENT = 12 * 1024 * 1024
 MAX_PHOTOS = 32 * 1024 * 1024
 LOG = logging.getLogger('mealapp.hosted')
+PROCESS_STARTED=time.monotonic()
 
 
 class HostedServiceError(ValueError):
@@ -155,20 +157,17 @@ def _remote_request(path, data=None, *, token=None, method=None, raw=False):
         headers['x-upsert'] = 'true'
     else:
         body = json.dumps(data, ensure_ascii=False, allow_nan=False).encode() if data is not None else None
-    request = urllib.request.Request(os.environ['SUPABASE_URL'].rstrip('/') + path, data=body, headers=headers, method=method)
+    from . import supabase_http
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            result = response.read(MAX_DOCUMENT + 1)
-            if len(result) > MAX_DOCUMENT:
-                raise ValueError('Hosted data exceeds the beta storage limit. Export a backup and reduce saved data.')
-            return result if raw else json.loads(result or b'null')
-    except urllib.error.HTTPError as exc:
-        try:
-            payload=json.loads(exc.read(16384))
-        except (ValueError,OSError):payload={}
-        finally:exc.close()
-        raise provider_error(path,exc.code,payload) from None
-    except (OSError, TimeoutError, json.JSONDecodeError):
+        status,result=supabase_http.request(os.environ['SUPABASE_URL'].rstrip('/')+path,body,headers,method,MAX_DOCUMENT,TIMINGS.get())
+        if status>=400:
+            try:payload=json.loads(result[:16384])
+            except ValueError:payload={}
+            raise provider_error(path,status,payload)
+        if not 200<=status<300:raise HostedServiceError('Supabase returned an unexpected redirect. Check SUPABASE_URL is the project API origin.','supabase_redirect')
+        if len(result)>MAX_DOCUMENT:raise ValueError('Hosted data exceeds the beta storage limit. Export a backup and reduce saved data.')
+        return result if raw else json.loads(result or b'null')
+    except (OSError, TimeoutError, http.client.HTTPException, json.JSONDecodeError):
         LOG.warning('Supabase connection or response failed: operation=%s',operation(path))
         raise HostedServiceError('Could not reach Supabase during '+operation(path).replace('_',' ')+'. Check that the project is active and SUPABASE_URL is its API origin (https://PROJECT_REF.supabase.co), then retry. Keep browser cookies.', 'supabase_unreachable') from None
 
@@ -182,6 +181,13 @@ class Session:
         self.epoch = 0
         self.revision = 0
         self.document = None
+        self.document_hash = None
+        self.image_names = set()
+        self.image_sizes = {}
+        self.cache_valid = False
+        self.cache_generation = 0
+        self.snapshot_generation = 0
+        self.photo_locks = {}
         self.progress = {'phase':'idle', 'started':None}
 
     @property
@@ -256,14 +262,56 @@ def config_path():
     return current().path / 'config.local.json'
 
 
+def fingerprint(document):
+    return hashlib.sha256(json.dumps(document,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def invalidate(session):
+    session.cache_generation+=1
+    session.cache_valid=False
+
+
+def ensure_photo(name):
+    """Fetch only the requested private image; never hydrate the workspace here."""
+    from . import dish_photos
+    session=current()
+    if not IMAGE.fullmatch(name):return None
+    path=session.path/'photos'/name
+    with SESSION_LOCK:lock=session.photo_locks.setdefault(name,threading.Lock())
+    with lock:
+        if path.is_file():return path
+        if session.document_hash is not None and name not in session.image_names:return None
+        raw=remote('/storage/v1/object/authenticated/health-diet-images/'+session.uid+'/'+name,token=session.token,raw=True)
+        if hashlib.sha256(raw).hexdigest()+'.png'!=name:raise ValueError('A saved dish image could not be verified. Please retry.')
+        dish_photos.validate_png(raw)
+        if session.document_hash is not None and name not in session.image_names:return None
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(raw)
+        session.image_sizes[name]=len(raw)
+        return path
+
+
+def ensure_all_photos():
+    if enabled():
+        for name in sorted(current().image_names):ensure_photo(name)
+
+
+def replace_photo_manifest(names):
+    if enabled():
+        current().image_names=set(names)
+        current().image_sizes={name:len(raw) for name,raw in names.items()}
+
+
 def load(session):
     from . import store, dish_photos
+    generation=session.cache_generation
     rows = remote('/rest/v1/health_beta_data?select=revision,document&user_id=eq.' + session.uid, token=session.token)
     document = rows[0]['document'] if rows else None
     session.revision = rows[0]['revision'] if rows else 0
     session.document = document
-    # Reconstruct from the durable source on every request, including after a
-    # failed local mutation or a successful write by an overlapping deployment.
+    session.document_hash=fingerprint(document) if document else None
+    # Explicit state reloads and invalid caches reconstruct from the durable
+    # source. Cached writes still have to pass Supabase's revision check.
     with store.db() as connection:
         for table in TABLES:
             connection.execute(f'CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
@@ -283,16 +331,12 @@ def load(session):
     for path in photos.glob('*.png'):
         if path.name not in names:
             path.unlink()
-    for name in names:
-        path = photos / name
-        if not path.exists():
-            raw = remote('/storage/v1/object/authenticated/health-diet-images/' + session.uid + '/' + name, token=session.token, raw=True)
-            if hashlib.sha256(raw).hexdigest() + '.png' != name:
-                raise ValueError('A saved dish image could not be verified. Please retry.')
-            dish_photos.validate_png(raw)
-            path.write_bytes(raw)
+    session.image_names=set(names)
+    session.image_sizes={name:size for name,size in (document or {}).get('image_sizes',{}).items() if name in session.image_names and type(size) is int and 0<=size<=4_000_000}
     if not document:
         store.initialize()
+    session.snapshot_generation=generation
+    session.cache_valid=generation==session.cache_generation
 
 
 def persist():
@@ -304,18 +348,27 @@ def persist():
         tables = {table:[{'id':row[0], 'body':json.loads(row[1])} for row in connection.execute(f'SELECT id,body FROM {table} ORDER BY rowid')] for table in TABLES}
     config = config_path()
     files = sorted((session.path / 'photos').glob('*.png'))
-    document = {'tables':tables, 'config':json.loads(config.read_text(encoding='utf-8')) if config.exists() else None, 'images':[p.name for p in files]}
-    if document == session.document:
+    if any(path.name not in session.image_names for path in files):
+        for name in session.image_names-session.image_sizes.keys():ensure_photo(name)
+    sizes={**session.image_sizes,**{p.name:p.stat().st_size for p in files}}
+    document = {'tables':tables, 'config':json.loads(config.read_text(encoding='utf-8')) if config.exists() else None, 'images':sorted(session.image_names|{p.name for p in files})}
+    if sizes:document['image_sizes']={name:size for name,size in sizes.items() if name in document['images']}
+    digest=fingerprint(document)
+    if digest == session.document_hash:
         return
-    if len(json.dumps(document, ensure_ascii=False).encode()) > MAX_DOCUMENT or sum(p.stat().st_size for p in files) > MAX_PHOTOS:
+    if len(json.dumps(document, ensure_ascii=False).encode()) > MAX_DOCUMENT or sum(sizes.get(name,0) for name in document['images']) > MAX_PHOTOS:
         raise ValueError('Beta storage limit reached (12 MB records, 32 MB photos per tester). Export a backup before reducing data.')
-    known = set((session.document or {}).get('images', []))
+    known = session.image_names
     for path in files:
         if path.name not in known:
             remote('/storage/v1/object/health-diet-images/' + session.uid + '/' + path.name, path.read_bytes(), token=session.token, method='POST', raw=True)
     result = remote('/rest/v1/rpc/health_beta_save', {'expected_revision':session.revision, 'new_document':document}, token=session.token)
     session.revision = result
-    session.document = document
+    session.document_hash=digest
+    session.image_names=set(document['images'])
+    session.image_sizes=document.get('image_sizes',{})
+    session.cache_valid=session.snapshot_generation==session.cache_generation
+    session.document=None
 
 
 @contextmanager
@@ -327,6 +380,9 @@ def write_scope():
     with session.lock:
         load(session)
         try:yield
+        except Exception:
+            invalidate(session)
+            raise
         finally:session.document=None
 
 
@@ -347,7 +403,9 @@ def delete_week(week):
     with plan_jobs.LOCK:
         check_job()
         try:
-            return remote('/rest/v1/rpc/health_beta_delete_week',{'target_week':week},token=current().token)
+            result=remote('/rest/v1/rpc/health_beta_delete_week',{'target_week':week},token=current().token)
+            invalidate(current())
+            return result
         except HostedServiceError as exc:
             if exc.code!='supabase_function_missing':raise
     # Backwards-compatible during rollout: a project that has not run the new
@@ -384,9 +442,13 @@ def serve(handler, callback):
         return callback()
     original = handler.wfile
     fast_delete=handler.command=='POST' and route=='/api/plan/delete'
+    fast_read=handler.command=='GET' and (route in {'/api/ai-progress','/api/status','/api/plan/job'} or route.startswith('/media/'))
+    isolated=fast_delete or fast_read
     stats={}
     timing_scope=TIMINGS.set(stats)
     started=time.monotonic()
+    cpu_started=time.thread_time()
+    session=None
     try:
         stage=time.monotonic()
         session = identity_for(handler, create=handler.command == 'GET' and route == '/api/state')
@@ -394,26 +456,31 @@ def serve(handler, callback):
         scope = CURRENT.set(session)
         try:
             stage=time.monotonic()
-            with (nullcontext() if fast_delete else session.lock), tempfile.SpooledTemporaryFile(max_size=1024*1024) as response:
+            with (nullcontext() if isolated else session.lock), tempfile.SpooledTemporaryFile(max_size=1024*1024) as response:
                 stats['lock_wait']=(time.monotonic()-stage)*1000
                 stage=time.monotonic()
-                if not fast_delete:load(session)
+                if not isolated:
+                    if route in {'/api/state','/api/backup/export','/api/export'} or not session.cache_valid:load(session)
                 stats['load']=(time.monotonic()-stage)*1000
                 handler.wfile = response
                 stage=time.monotonic()
                 callback()
                 stats['action']=(time.monotonic()-stage)*1000
                 stage=time.monotonic()
-                if not fast_delete and getattr(handler, 'response_code', 500) < 400:
+                if not isolated and getattr(handler, 'response_code', 500) < 400:
                     persist()
+                elif not isolated and handler.command=='POST':invalidate(session)
                 stats['persist']=(time.monotonic()-stage)*1000
                 stats['total']=(time.monotonic()-started)*1000
+                stats['process_age']=(time.monotonic()-PROCESS_STARTED)*1000
+                stats['thread_cpu']=(time.thread_time()-cpu_started)*1000
                 handler.wfile = original
                 send_timed_response(response,original,stats)
                 if not fast_delete:session.document=None
         finally:
             CURRENT.reset(scope)
     except (ValueError, OSError, KeyError, TypeError) as exc:
+        if session is not None:invalidate(session)
         handler.wfile = original
         handler._headers_buffer = []
         if isinstance(exc,HostedServiceError):
@@ -424,6 +491,6 @@ def serve(handler, callback):
             handler.reply({'error':'The hosted workspace could not be loaded or saved. Check Render Logs for the safe error category; no successful save was acknowledged.','code':'hosted_workspace_failed'},503)
     finally:
         handler.wfile = original
-        if route=='/api/plan/delete':
-            LOG.info('Week delete timing: %s',json.dumps({name:round(value,1) for name,value in stats.items()},sort_keys=True))
+        if route in {'/api/plan/delete','/api/plan/add','/api/recipes'}:
+            LOG.info('Workspace timing route=%s: %s',route,json.dumps({name:round(value,1) for name,value in stats.items()},sort_keys=True))
         TIMINGS.reset(timing_scope)

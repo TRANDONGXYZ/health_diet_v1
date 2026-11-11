@@ -31,6 +31,8 @@ def json_bytes(value):
 
 
 def export_zip():
+    from . import hosted
+    hosted.ensure_all_photos()
     with store.LOCK:
         weekly.history()
         with store.db() as connection:
@@ -261,6 +263,8 @@ def apply_validated(data,images,serialized):
                     connection.executemany(f'INSERT INTO {table} VALUES (?,?)',serialized[table])
             store.bump_epoch()
             plan_jobs.clear_current()
+            from . import hosted
+            hosted.replace_photo_manifest(images)
         except Exception as exc:
             if new_config:os.replace(config,stage/'failed-config.json')
             if old_config:os.replace(stage/'old-config.json',config)

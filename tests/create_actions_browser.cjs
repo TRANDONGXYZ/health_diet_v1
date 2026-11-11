@@ -1,0 +1,50 @@
+// Shared manual-write UI: no reload/poll, acknowledgement-first, stale reads safe.
+const {chromium}=require('playwright'),assert=require('node:assert/strict');
+const {spawn}=require('node:child_process');
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const folder=fs.mkdtempSync(path.join(os.tmpdir(),'meal-create-actions-'));
+const origin='http://127.0.0.1:8777';let browser;
+const server=spawn(process.env.PYTHON||'python',['tests/browser_server.py'],{cwd:path.resolve(__dirname,'..'),env:{...process.env,MEAL_APP_DATA:folder,MEAL_TEST_PORT:'8777'},stdio:'pipe',windowsHide:true});
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function run(){
+  for(let i=0;i<80;i++){try{if((await fetch(origin)).ok)break;}catch{}await wait(100);}
+  browser=await chromium.launch({channel:'msedge',headless:true});const page=await browser.newPage(),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));await page.goto(origin);await page.waitForFunction(()=>state.calendar);
+  let tracked=[];page.on('request',request=>{if(request.url().includes('/api/'))tracked.push(new URL(request.url()).pathname);});
+  let releaseState,heldState;const stateHeld=new Promise(resolve=>heldState=resolve),stateGate=new Promise(resolve=>releaseState=resolve);
+  await page.route('**/api/state*',async route=>{const response=await route.fetch();heldState();await stateGate;await route.fulfill({response});});
+  await page.evaluate(()=>{window.__oldRefresh=refresh();});await stateHeld;
+  await page.getByRole('button',{name:'Add Week',exact:true}).click();
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'create-week');
+  const week=await page.locator('#add-week-select').inputValue();tracked=[];
+  await page.keyboard.press('Enter');await page.locator('#add-week-modal').waitFor({state:'hidden'});
+  assert.equal(tracked.filter(path=>path==='/api/plan/add').length,1);
+  assert.equal(tracked.filter(path=>path==='/api/state').length,0);
+  releaseState();await page.evaluate(()=>window.__oldRefresh);await page.unroute('**/api/state*');
+  assert.equal(await page.locator(`.future-week[data-week="${week}"]`).count(),1);
+  await page.getByRole('tab',{name:/Dish List/}).click();await page.getByRole('button',{name:'+ Create recipe',exact:true}).click();
+  await page.locator('#recipe-form [name=name]').fill('Acknowledged recipe');
+  let releaseSave,heldSave;const saveHeld=new Promise(resolve=>heldSave=resolve),saveGate=new Promise(resolve=>releaseSave=resolve);
+  await page.route('**/api/recipes',async route=>{heldSave();await saveGate;await route.continue();});
+  tracked=[];await page.getByRole('button',{name:'Save recipe',exact:true}).click();await saveHeld;
+  assert.equal(await page.locator('#recipe-modal').isVisible(),true);
+  assert.equal(await page.evaluate(()=>state.recipes.some(recipe=>recipe.name==='Acknowledged recipe')),false);
+  await wait(2200);assert.equal(tracked.filter(path=>path==='/api/ai-progress').length,0,'Manual save does not poll AI');
+  releaseSave();await page.locator('#recipe-modal').waitFor({state:'hidden'});await page.unroute('**/api/recipes');
+  assert.equal(tracked.filter(path=>path==='/api/recipes').length,1);assert.equal(tracked.filter(path=>path==='/api/state').length,0);
+  assert.match(await page.locator('#notification').innerText(),/Recipe saved/);
+  await page.locator('.dish-card').filter({hasText:'Acknowledged recipe'}).getByRole('button',{name:'Edit recipe',exact:true}).click();
+  await page.locator('#recipe-form [name=name]').fill('Must not be acknowledged');
+  await page.route('**/api/recipes',route=>route.fulfill({status:503,json:{error:'Test storage unavailable'}}));
+  await page.getByRole('button',{name:'Save recipe',exact:true}).click();
+  await page.locator('#recipe-modal .danger').filter({hasText:'Test storage unavailable'}).waitFor();
+  assert.equal(await page.locator('#recipe-modal').isVisible(),true);
+  assert.equal(await page.evaluate(()=>state.recipes[0].name),'Acknowledged recipe');
+  await page.unroute('**/api/recipes');await page.getByRole('button',{name:'Close recipe editor'}).click();
+  await page.reload();await page.waitForFunction(()=>state.calendar);
+  assert.equal(await page.evaluate(()=>state.recipes[0].name),'Acknowledged recipe');
+  assert.equal(await page.locator(`.future-week[data-week="${week}"]`).count(),1);
+  assert.deepEqual(errors,[]);
+  console.log('PASS: Enter adds one week without state reload; stale refresh cannot remove it; recipe save waits for durable success without AI polls/state reload; failure retains form and saved recipe; week/recipe persist after reload.');
+}
+run().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{await browser?.close();server.kill();await new Promise(resolve=>server.once('exit',resolve));assert.ok(path.resolve(folder).startsWith(path.join(os.tmpdir(),'meal-create-actions-')));fs.rmSync(folder,{recursive:true,force:true});});

@@ -59,6 +59,12 @@ A signed **Secure, HttpOnly, SameSite=Lax** cookie retains the anonymous identit
 
 SQLite and photos under temporary folders are working copies, reconstructed from Supabase. They are not the durable storage. Mutations and AI job results are acknowledged only after a durable revision-checked commit. Concurrent/stale deployment writes fail rather than overwrite newer data. If storage fails, the UI receives an error and the next request reloads the last durable version. A failed image/metadata commit may leave an unreferenced private image; there is no automatic image garbage collection in this first beta.
 
+For performance, ordinary mutations reuse the tester's current working copy;
+explicit page/state reloads and backups fetch the durable version. Conflicts,
+failed writes and atomic week deletes invalidate the cache. Private photos are
+downloaded on demand, and backups still include the full image manifest. No
+additional SQL or environment variables are needed for this shared optimization.
+
 ZIP export/import retains the existing versioned `backup-v1.json` plus `images/` format, including all weeks, deleted slots, collapse states and tester settings. Import confirmation and validation still apply; import replaces only that tester's workspace. Operator environment secrets are not exported. Local backups can be imported into the tester's own hosted session. Hosted model/provider settings are managed by the operator; imported local model names/keys do not change hosted inference. Hosted bounds: **12 MB structured records, 32 MB photos per tester; 48 MB ZIP upload/expanded validation**, with the existing 500 × 500 PNG and 4 MB individual photo validation. Local backup limits stay unchanged.
 
 ## Hosted AI and beta limits

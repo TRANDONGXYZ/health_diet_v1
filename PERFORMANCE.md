@@ -1,5 +1,57 @@
 # Weekly plan deletion timings
 
+## Shared Add Week and recipe-save investigation
+
+The later investigation measured the actual Enter-to-new-week and
+Save-recipe-click-to-confirmation intervals in separate disposable testers.
+On the warm deployment before the shared fix, Add Week took
+4.214 / 4.708 / 2.758 seconds; name-only recipe saves took
+3.135 / 4.047 / 4.117 seconds. The local equivalents took 57–61 ms and
+62–66 ms. The saved data remained present after reload.
+
+For example, the second recipe save spent 858 ms loading records, 9 ms in
+application work, and 891 ms saving records. It then waited for another state
+fetch: 764 ms queued behind the unnecessary AI-progress storage read, followed
+by an 885 ms state load. The trace demonstrates a shared round-trip/queueing
+problem during normal use, without invoking AI or requiring a cold start.
+
+The shared fix reuses per-tester SQLite working copies for ordinary mutations,
+while still requiring a revision-checked Supabase write before acknowledging
+success. Explicit state reloads and backups read the authoritative source;
+conflicts/errors invalidate the cache. A concurrent atomic week deletion also
+invalidates it. Only a fingerprint and photo metadata are retained in memory,
+not an unbounded copy of the complete JSON document for each tester.
+
+Images load individually from private storage; backups fetch every manifest
+image, including images not displayed in the current browser. Progress, job
+status and provider status no longer hydrate the workspace. A bounded keep-alive
+transport reuses secure connections, passes Authorization separately on each
+request, discards stale sockets and never automatically retries ambiguous
+writes. The two forms update from their durable mutation responses instead of
+fetching the whole state again; manual recipe saves do not poll AI progress.
+
+Additional safe timing fields are `storage_connect`, `storage_headers`,
+`storage_body`, `storage_pool_wait`, `thread_cpu` and `process_age` (milliseconds).
+The last is service-process age, not request execution time; comparing it before
+and after inactivity helps identify a restart. A small process age plus a large
+client wait outside server `total` is consistent with a platform cold start.
+
+```powershell
+node tests/measure_create_actions.cjs --local --output test-results/create-local.json
+node tests/measure_create_actions.cjs --url https://health-diet-v1.onrender.com --output test-results/create-live.json
+node tests/measure_create_actions.cjs --url https://health-diet-v1.onrender.com --idle-seconds 960 --output test-results/create-live-idle.json
+node tests/create_actions_browser.cjs
+```
+
+The idle check retains two test pages with their forms prepared, disables their
+refresh timers, and starts both first actions together after sixteen minutes.
+It then repeats each action twice while the service is running. Other app tabs
+or visitors may keep Render awake; test-page inactivity alone does not prove a
+platform cold start. See the live measurement JSON for actual timings and
+process-age evidence; do not attribute warm storage latency to the Free tier
+without that evidence. The checks verify the last created week and recipe after
+a full reload, and print no API keys, cookies or personal records.
+
 The browser timing check uses a new isolated anonymous tester and creates its own
 empty future weeks. It never opens an existing tester's cookbook. `--images`
 also creates seven disposable photo recipes and an additional populated week.

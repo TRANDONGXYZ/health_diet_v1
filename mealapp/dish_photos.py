@@ -17,6 +17,9 @@ def path_for(url):
 def validate_url(url):
     if not url:
         return ""
+    from . import hosted
+    match=URL.fullmatch(str(url))
+    if hosted.enabled() and match:hosted.ensure_photo(match[1])
     with store.LOCK:
         store.check_epoch()
         path = path_for(url)

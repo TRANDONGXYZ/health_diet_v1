@@ -82,7 +82,7 @@ def post(route, data):
             if result.get("error"):
                 warnings.append(result["name"] + ": " + result["error"])
         store.put("recipes", recipe["id"], recipe)
-        return {"recipe": recipe, "calories": store.calories(recipe), "warnings": warnings}
+        return {"recipe": recipe, "calories": store.calories(recipe), "warnings": warnings,"foods":store.all_items('foods')}
     if route == "/api/recipes/delete":
         with plan_jobs.LOCK:
             store.remove_recipe(text(data.get("id"), 100))
@@ -254,6 +254,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/export":
             return self.reply({"version": 2, "recipes": store.all_items("recipes"), "foods": store.all_items("foods"), "plans":weekly.history()})
         if route.startswith("/media/"):
+            if hosted.enabled():
+                match=dish_photos.URL.fullmatch(route)
+                if match:hosted.ensure_photo(match[1])
             with store.LOCK:
                 path = dish_photos.path_for(route)
                 if not path or not path.is_file():
