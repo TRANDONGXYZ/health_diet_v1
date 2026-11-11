@@ -47,6 +47,46 @@ timing header reports one `week_delete` call and zero load/persist time. Local
 confirmed deletes took 0.030–0.052 seconds (confirmation opened in 1–3 ms).
 These fixture/local numbers are separate from live deployment measurements.
 
+## Verified live deployment
+
+Commit `e557eee` was pushed to `main` and automatically deployed to
+https://health-diet-v1.onrender.com. The updated SQL function was installed in
+Supabase before testing. The same isolated browser check was repeated after the
+new frontend and backend were live:
+
+| Scenario | Before: click to disappearance | After: confirmation to disappearance |
+| --- | --- | --- |
+| Warm Render, attempt 1 | 3.325 s | 1.174 s |
+| Warm Render, attempt 2 | 3.446 s | 1.163 s |
+| Seven photos loading, attempt 1 | 2.554 s | 1.136 s |
+| Seven photos loading, attempt 2 | 5.779 s | 0.693 s |
+| Local, attempt 1 | 0.103 s | 0.052 s |
+| Local, attempt 2 | 0.068 s | 0.030 s |
+
+The previous build did not show a week-delete confirmation; it has no comparable
+pre-fix dialog-opening measurement. The updated live confirmation opened in
+0–1 ms. Human decision time is excluded. After-fix complete click-to-removal
+times were 1.183/1.170 s (warm) and 1.148/0.699 s (photos).
+
+Live response headers confirm the new RPC path: `lock_wait`, `load` and `persist`
+were all zero; `week_delete` was the only storage operation. The two warm RPCs
+took 879/854 ms on the server, with the remaining browser time in transit. No
+follow-up `/api/state` request occurred. Both deleted weeks stayed absent after
+reload, while the unrelated populated week remained.
+
+Before deployment, a separate browser retained its page and anonymous session
+without any test refresh traffic for 960 seconds. Its first delete took 3.449 s,
+and its second took 3.028 s. This run did not show a distinct cold-start penalty;
+other traffic can keep the service awake. It confirms the delay also occurs
+while the service is running. The idle experiment was not repeated after the fix.
+
+Raw timing files are local ignored artifacts under `test-results/`:
+`delete-live-before.json`, `delete-live-after.json`,
+`delete-live-images-before.json`, `delete-live-images-after.json`,
+`delete-live-idle-before.json`, `delete-local-before.json`,
+`delete-local-after.json`, `delete-hosted-before.json`, and
+`delete-hosted-after.json`. They contain timings, not credentials or tester data.
+
 ## Reproduce and capture
 
 These developer scripts require Node, Playwright and installed Microsoft Edge:
