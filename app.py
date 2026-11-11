@@ -2,7 +2,9 @@
 import argparse
 import base64
 import json
+import os
 import secrets
+import tempfile
 import threading
 import traceback
 import urllib.parse
@@ -11,7 +13,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from mealapp import ai, nutrition, store, web, weekly, plan_jobs, dish_photos, backups
+from mealapp import ai, nutrition, store, web, weekly, plan_jobs, dish_photos, backups, hosted
 
 PUBLIC = store.ROOT / "public"
 TOKEN = secrets.token_urlsafe(32)
@@ -161,6 +163,8 @@ def post(route, data):
     if route == "/api/plan/save":
         raise ValueError("Plans save automatically. Use meal replacement to change a saved date.")
     if route == "/api/settings":
+        if hosted.enabled():
+            raise ValueError('Hosted AI models and provider keys are managed by the beta operator. Local model settings remain available in local mode.')
         settings = {"text_model": text(data.get("text_model"), 150), "vision_model": text(data.get("vision_model"), 150), "language": "auto", "vietnamese_model": text(data.get("vietnamese_model") or ai.config()["vietnamese_model"], 150), "english_model": text(data.get("english_model") or ai.config()["english_model"], 150)}
         if any(not settings[k] for k in ("text_model", "vision_model", "vietnamese_model", "english_model")):
             raise ValueError("Choose model names.")
@@ -172,7 +176,14 @@ def post(route, data):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def send_response(self, code, message=None):
+        self.response_code=code
+        super().send_response(code,message)
+
     def headers_common(self, content_type, cache="no-store"):
+        if getattr(self,'session_cookie',None):
+            self.send_header('Set-Cookie',self.session_cookie)
+            self.session_cookie=None
         self.send_header("Content-Type", content_type)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -188,12 +199,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def local_request(self):
+        if hosted.enabled():return hosted.origin_allowed(self)
         host = self.headers.get("Host", "")
         allowed = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
         origin = self.headers.get("Origin")
         return host in allowed and (not origin or origin in {"http://" + h for h in allowed})
 
     def do_GET(self):
+        if hosted.enabled():return hosted.serve(self,self.get_request)
+        return self.get_request()
+
+    def get_request(self):
         if not self.local_request():
             return self.reply({"error": "Only local same-origin access is allowed."}, 403)
         route = urllib.parse.urlsplit(self.path).path
@@ -208,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
                 plans = weekly.history()
                 recipes = store.all_items("recipes")
                 settings = ai.config()
-                payload={"token": TOKEN, "recipes": [dict(r, calories=store.calories(r)) for r in recipes], "foods": store.all_items("foods"), "plan":next((p for p in plans if p["week_start"]==calendar["week_start"]),None),
+                payload={"token": hosted.csrf() if hosted.enabled() else TOKEN, "hosted":hosted.enabled(), "recipes": [dict(r, calories=store.calories(r)) for r in recipes], "foods": store.all_items("foods"), "plan":next((p for p in plans if p["week_start"]==calendar["week_start"]),None),
                                    "plans":plans,"calendar":calendar,"plan_job":active_job,"week_expansion":store.get('state','week_expansion',{}),
                                    "settings": {k: settings[k] for k in ("text_model", "vision_model", "vietnamese_model", "english_model", "language")}, "has_usda_key": settings["usda_api_key"] != "DEMO_KEY"}
             return self.reply(payload)
@@ -259,14 +275,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if not self.local_request() or self.headers.get("X-App-Token") != TOKEN:
+        if hosted.enabled():return hosted.serve(self,self.post_request)
+        return self.post_request()
+
+    def post_request(self):
+        if not self.local_request() or self.headers.get("X-App-Token") != (hosted.csrf() if hosted.enabled() else TOKEN):
             return self.reply({"error": "Reload the page before saving. Only local same-origin access is allowed."}, 403)
         try:
             with store.request_scope():
                 length = int(self.headers.get("Content-Length", 0))
+                if urllib.parse.urlsplit(self.path).path == '/api/transcribe':
+                    if not 0 < length <= 24*1024*1024:
+                        return self.reply({'error':'Choose an audio/video file under 24 MB.'},413)
+                    filename=self.headers.get('X-File-Name','')
+                    suffix=Path(filename).suffix.lower()
+                    if suffix not in ('.mp3','.mp4','.mpeg','.mpga','.m4a','.ogg','.wav','.webm','.flac'):
+                        return self.reply({'error':'Choose an MP3, MP4, M4A, OGG, WAV, WebM, MPEG or FLAC file you are allowed to use.'},400)
+                    from mealapp import speech
+                    with tempfile.TemporaryDirectory(prefix='health-upload-') as folder:
+                        path=Path(folder)/('upload'+suffix)
+                        path.write_bytes(self.rfile.read(length))
+                        transcript=speech.transcribe_file(path,folder)
+                    return self.reply({'text':transcript})
                 if urllib.parse.urlsplit(self.path).path == "/api/backup/import":
-                    if not 0 < length <= backups.MAX_ARCHIVE:
-                        return self.reply({"error":"Choose a ZIP backup under 256 MB."},413)
+                    limit=48*1024*1024 if hosted.enabled() else backups.MAX_ARCHIVE
+                    if not 0 < length <= limit:
+                        return self.reply({"error":"Choose a ZIP backup under "+('48' if hosted.enabled() else '256')+" MB."},413)
                     if self.headers.get("Content-Type",'').split(';')[0] not in ('application/zip','application/octet-stream'):
                         return self.reply({"error":"Upload a ZIP backup."},415)
                     return self.reply(backups.import_zip(self.rfile.read(length)))
@@ -292,17 +326,19 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="Local recipe and weekly meal planner")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=int(os.environ.get('PORT',8765)))
+    parser.add_argument("--host", default='0.0.0.0' if hosted.enabled() else '127.0.0.1')
     parser.add_argument("--open", action="store_true", help="Open your default browser")
     args = parser.parse_args()
-    store.initialize()
+    if hosted.enabled():hosted.validate_environment()
+    else:store.initialize()
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
     except OSError:
         print(f"Port {args.port} is busy. Close the other app, or run: python app.py --port 8766 --open")
         return
     url = f"http://127.0.0.1:{args.port}"
-    print(f"Meal Notebook is running at {url}\nData: {store.DATA}\nPress Ctrl+C to stop.", flush=True)
+    print(f"Meal Notebook is running on {args.host}:{args.port}\nData: {'Supabase per-tester storage' if hosted.enabled() else store.DATA}\nPress Ctrl+C to stop.", flush=True)
     if args.open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:

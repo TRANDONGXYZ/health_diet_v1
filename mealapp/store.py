@@ -8,14 +8,49 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = Path(os.environ.get("MEAL_APP_DATA", ROOT / "data"))
+_LOCAL_DATA = Path(os.environ.get("MEAL_APP_DATA", ROOT / "data"))
+
+
+class WorkspacePath:
+    def path(self):
+        from . import hosted
+        return hosted.current().path if hosted.enabled() else _LOCAL_DATA
+
+    def __truediv__(self, other):
+        return self.path() / other
+
+    def __fspath__(self):
+        return str(self.path())
+
+    def __str__(self):
+        return str(self.path())
+
+    def __getattr__(self, name):
+        return getattr(self.path(), name)
+
+
+DATA = WorkspacePath()
 LOCK = threading.RLock()
 REQUEST = threading.local()
 EPOCH = 0
 
 
+def epoch():
+    from . import hosted
+    return hosted.current().epoch if hosted.enabled() else EPOCH
+
+
+def bump_epoch():
+    global EPOCH
+    from . import hosted
+    if hosted.enabled():
+        hosted.current().epoch += 1
+    else:
+        EPOCH += 1
+
+
 def check_epoch():
-    if getattr(REQUEST,'epoch',EPOCH)!=EPOCH:
+    if getattr(REQUEST,'epoch',epoch())!=epoch():
         raise ValueError('Data was restored while this request was running. Reload and try again.')
 
 
@@ -23,7 +58,7 @@ def check_epoch():
 def request_scope():
     previous=getattr(REQUEST,'epoch',None)
     with LOCK:
-        REQUEST.epoch=EPOCH
+        REQUEST.epoch=epoch()
     try:
         yield
     finally:

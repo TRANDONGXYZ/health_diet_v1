@@ -1,6 +1,7 @@
 import http.client
 import json
 import math
+import os
 import socket
 from contextlib import contextmanager
 import threading
@@ -73,16 +74,19 @@ class AITimeoutError(ValueError):
 
 
 def progress():
+    from . import hosted
     with PROGRESS_LOCK:
-        state = dict(PROGRESS)
+        state = dict(hosted.current().progress if hosted.enabled() else PROGRESS)
     started = state.pop("started")
     state["elapsed_seconds"] = round(time.monotonic() - started) if started is not None else 0
     return state
 
 
 def _phase(phase, started=None):
+    from . import hosted
     with PROGRESS_LOCK:
-        PROGRESS.update(phase=phase, started=started if phase != "idle" else None)
+        target = hosted.current().progress if hosted.enabled() else PROGRESS
+        target.update(phase=phase, started=started if phase != "idle" else None)
 
 
 def _chat(payload, values):
@@ -184,17 +188,26 @@ def _chat(payload, values):
 
 
 def config():
+    from . import hosted, groq_ai
     with STORE_LOCK:
         values = dict(DEFAULTS)
-        path = ROOT / "config.local.json"
+        path = hosted.config_path() if hosted.enabled() else ROOT / "config.local.json"
         if path.exists():
             values.update(json.loads(path.read_text(encoding="utf-8")))
         values.update(get("state", "settings", {}))
         values["language"] = "auto"
+        if hosted.enabled() or os.environ.get('AI_PROVIDER') == 'groq':
+            values.update({key:groq_ai.TEXT_MODEL for key in ('text_model','vision_model','english_model','vietnamese_model')})
+            values['usda_api_key']=os.environ.get('USDA_API_KEY','DEMO_KEY')
         return values
 
 def status():
+    from . import hosted
     values = config()
+    if hosted.enabled() or os.environ.get('AI_PROVIDER')=='groq':
+        ready=bool(os.environ.get('GROQ_API_KEY'))
+        return {'provider':'groq','connected':ready,'models':[values['text_model']],
+                'text_ready':ready,'vision_ready':ready,'vietnamese_ready':ready,'english_ready':ready}
     try:
         with urllib.request.urlopen(values["ollama_url"] + "/api/tags", timeout=3) as response:
             models = [m["name"] for m in json.load(response).get("models", [])]
@@ -224,7 +237,8 @@ def ask(task, schema, image=None, max_tokens=3000, language="English", model=Non
     if not LOCK.acquire(blocking=False):
         raise ValueError("Another AI task is running. Wait for it to finish, then try again.")
     try:
-        result = _chat(payload, values)
+        from . import hosted, groq_ai
+        result = groq_ai.chat(system,task,schema,image,max_tokens) if hosted.enabled() or os.environ.get('AI_PROVIDER')=='groq' else _chat(payload, values)
         cancel = getattr(REQUEST, "cancel", None)
         if cancel:
             cancel.check()

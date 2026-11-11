@@ -98,6 +98,22 @@ def run(command, timeout, failure):
 
 def transcribe_file(audio_path, folder, assets=None):
     """Normalize any downloaded audio to mono 16 kHz PCM, then transcribe locally."""
+    from . import hosted
+    if hosted.enabled() or os.environ.get('AI_PROVIDER')=='groq':
+        from . import groq_ai
+        import shutil
+        ffmpeg=shutil.which('ffmpeg')
+        if not ffmpeg:raise ValueError('Hosted audio tools are unavailable. Paste a transcript instead.')
+        converted=Path(folder)/'hosted-audio.flac'
+        # Convert at most ten minutes plus one second, then reject overlong audio.
+        run([ffmpeg,'-nostdin','-hide_banner','-loglevel','error','-y','-i',str(audio_path),'-vn','-ac','1','-ar','16000','-t','601',str(converted)],90,'The file could not be read. Upload a supported audio/video file or paste its transcript.')
+        import subprocess
+        probe=run([shutil.which('ffprobe') or 'ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(converted)],15,'Could not check the audio duration. Paste a transcript instead.')
+        if float(probe.stdout.strip())>600:
+            raise ValueError('The beta audio limit is ten minutes. Trim the file or paste its transcript.')
+        if not ai.LOCK.acquire(blocking=False):raise ValueError('Another AI task is running. Try again shortly; manual actions are still available.')
+        try:return groq_ai.transcribe(converted)
+        finally:ai.LOCK.release()
     cli, model, ffmpeg = assets or ensure_assets()
     settings = ai.config()
     max_seconds = int(settings.get("speech_max_video_minutes", 60)) * 60
@@ -141,12 +157,14 @@ def transcribe_video(url):
     if not AUDIO_LOCK.acquire(blocking=False):
         raise ValueError("Another audio transcription is running. Wait for it to finish, then try again.")
     try:
-        assets = ensure_assets()
-        max_seconds = int(settings.get("speech_max_video_minutes", 60)) * 60
+        from . import hosted
+        cloud=hosted.enabled() or os.environ.get('AI_PROVIDER')=='groq'
+        assets = None if cloud else ensure_assets()
+        max_seconds = 600 if cloud else int(settings.get("speech_max_video_minutes", 60)) * 60
         with tempfile.TemporaryDirectory(prefix="meal-audio-") as folder:
             command = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-progress", "--socket-timeout", "15", "--retries", "1", "--fragment-retries", "1", "--max-filesize", "200M", "--match-filters", f"!is_live & duration <= {max_seconds}", "-f", "bestaudio[ext=m4a]/bestaudio/best", "--paths", folder, "-o", "audio.%(ext)s", "--", url]
             platform_name = "Facebook" if facebook_video(url) else "YouTube" if youtube_id(url) else "the video site"
-            run(command, int(settings.get("video_download_timeout_seconds", 300)), f"Could not download the video's audio from {platform_name}. The video may be private, require sign-in, be unavailable, live, or above the duration/size limit. Use a publicly accessible video or paste its transcript. No browser cookies or sign-in credentials are read.")
+            run(command, 90 if cloud else int(settings.get("video_download_timeout_seconds", 300)), f"Could not retrieve audio from {platform_name}. The hosting server may be blocked, or the video may require sign-in or exceed the limits. Paste its transcript or upload an audio/video file you are allowed to use. No browser cookies or sign-in credentials are read.")
             files = [p for p in Path(folder).glob("audio.*") if p.is_file() and p.suffix not in {".part", ".ytdl"}]
             if len(files) != 1:
                 raise ValueError("No complete audio file was downloaded. The video may be live, unavailable, or above the 200 MB/configured duration limit.")

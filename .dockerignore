@@ -1,0 +1,14 @@
+.git
+.venv
+.tools
+data
+test-results
+node_modules
+__pycache__
+**/__pycache__
+*.pyc
+config.local.json
+.env
+.env.*
+tests
+*.zip

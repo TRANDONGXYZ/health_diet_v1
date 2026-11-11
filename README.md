@@ -2,6 +2,8 @@
 
 A small recipe library and weekly planner. The browser UI uses plain JavaScript; the server uses Python and SQLite. No Node.js, frontend build, subscription, or cloud AI key is needed.
 
+For the **Render Free public beta**, see [DEPLOYMENT.md](DEPLOYMENT.md): GitHub `main` deployment, server-side Groq, Supabase anonymous tester storage, backup migration, environment variables and verification. Running `start.cmd` still uses the local app and Ollama.
+
 ## Start on Windows 11
 
 1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/). Select **Add Python to PATH**. Python 3.15 is also supported by the core app and the installed caption dependencies.

@@ -102,8 +102,9 @@ def guidance(food):
             quote = item.get("quote", "").strip()
             if source and quote and len(quote.split()) <= 24 and " ".join(quote.lower().split()) in " ".join(source["text"].lower().split()):
                 items.append({**item, "url": source["url"]})
-    except ValueError:
-        warnings.append("AI evidence selection was unavailable. Matching source quotations are shown when available.")
+    except ValueError as exc:
+        from . import hosted
+        warnings.append(str(exc) if hosted.enabled() else "AI evidence selection was unavailable. Matching source quotations are shown when available.")
     if not items:
         # An exact source sentence remains useful even when the small model fails JSON.
         # Never synthesize advice, infer safety, or manufacture a daily food amount.

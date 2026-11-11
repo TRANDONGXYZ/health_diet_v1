@@ -177,6 +177,9 @@ def youtube_captions(video_id):
 
 def video_source(url):
     public_url(url)
+    from . import hosted
+    if hosted.enabled() and not (youtube_id(url) or facebook_video(url)):
+        raise ValueError('The beta retrieves only public YouTube and Facebook videos. Paste a transcript or upload an audio/video file you are allowed to use.')
     video_id = youtube_id(url)
     if video_id:
         try:
@@ -211,7 +214,8 @@ def extract(url, kind="auto"):
     text = source["text"]
     if not text.strip():
         raise ValueError("The source returned no text. Paste the recipe or transcript instead.")
-    kind = "locally generated audio transcript" if source["method"] == "audio" else "video transcript" if is_video else "article"
+    from . import hosted
+    kind = ("audio transcript" if hosted.enabled() else "locally generated audio transcript") if source["method"] == "audio" else "video transcript" if is_video else "article"
     return {"text": text, "kind": kind, "method": source["method"], "url": url}
 
 

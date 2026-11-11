@@ -38,7 +38,7 @@ async function work(label, callback) {
       if (!polling) return;
       const seconds = Math.max(status.elapsed_seconds || 0, Math.round((Date.now() - workStarted) / 1000));
       const elapsed = `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-      const message = status.phase === 'loading' ? `Local AI is loading the model or reading the source · ${elapsed}` : status.phase === 'generating' ? `Local AI is generating a response · ${elapsed}` : label;
+      const message = status.phase === 'loading' ? `${state.hosted?'Hosted':'Local'} AI is reading the source · ${elapsed}` : status.phase === 'generating' ? `${state.hosted?'Hosted':'Local'} AI is generating a response · ${elapsed}` : label;
       $('#busy-text').textContent = message;
       if (!progress.dataset.persist) progress.textContent = message + ' — please wait…';
     } catch { /* Progress availability does not decide whether the main request succeeds. */ }
@@ -81,11 +81,21 @@ async function refresh() {
   $('#dish-count').textContent = state.recipes.length; $('#food-count').textContent = `${state.foods.length} food references`;
   $('#food-options').innerHTML = state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join('');
   renderDishes(); renderWeek();
+  $('#storage-label').textContent=state.hosted?'Private beta workspace · Keep browser cookies or export a backup':'Stored on this laptop';
+  $('#settings-form').hidden=!!state.hosted;
+  if(state.hosted&&!$('#hosted-settings-info'))$('#settings-form').insertAdjacentHTML('beforebegin','<p id="hosted-settings-info" class="footnote">AI is provided by the beta operator through Groq. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.</p>');
+  if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';$('#photo-modal>.muted').textContent='Identify a food with hosted AI, confirm the name, then retrieve nutrition and guidance online. A photo cannot reveal exact ingredients or portion weight.';}
+  if(state.hosted)$('#import-box .import-content>p.footnote:last-of-type').textContent='Vietnamese and English stay in the source language. Hosted video retrieval may be blocked. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.';
 }
 async function checkStatus() {
   const node = $('#model-status');
   try {
     const status = await api('/api/status');
+    if(status.provider==='groq'){
+      node.classList.toggle('ready',status.connected);node.textContent=status.connected?'Hosted AI · Groq':'Hosted AI unavailable · manual tools still work';
+      $('#settings-status').textContent='Hosted AI is managed by the beta operator. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.';
+      return;
+    }
     const ready=status.vietnamese_ready && status.english_ready;
     node.classList.toggle('ready',ready);
     const missing=[!status.vietnamese_ready && state.settings.vietnamese_model,!status.english_ready && state.settings.english_model].filter(Boolean);
@@ -422,7 +432,7 @@ document.addEventListener('click', async event => {
     if (!recipe)return;
     if (confirm(`Delete “${recipe.name}”? This will mark the dish as “Dish deleted” everywhere it appears in Weekly Meals, including past, current, and upcoming weeks.`)) await work('Deleting recipe',async () => { await api('/api/recipes/delete',{id}); await refresh(); notify('Recipe deleted.'); });
   }
-  if (action === 'retrieve') await work('Retrieving source; videos without captions are downloaded as audio and transcribed locally. This can take several minutes',async () => {
+  if (action === 'retrieve') await work(state.hosted?'Retrieving source; if the host is blocked, paste a transcript or upload a file you are allowed to use':'Retrieving source; videos without captions are downloaded as audio and transcribed locally. This can take several minutes',async () => {
     const f = $('#recipe-form'); const source = await api('/api/extract',{url:f.elements.source_url.value,kind:$('#source-kind').value});
     f.elements.source_text.value = source.text; showSourceLanguage(); $('#recipe-message').textContent = `Retrieved ${source.kind}. ${source.method === 'audio' ? 'Speech recognition can mishear ingredient names and amounts. ' : ''}Review the text, then click Extract recipe with AI.`;
   });
@@ -459,7 +469,7 @@ document.addEventListener('click', async event => {
   if (action === 'start-camera') await startCamera();
   if (action === 'stop-camera') stopCamera();
   if (action === 'capture-camera') await captureCamera();
-  if (action === 'identify') await work('Identifying the food locally',async () => { const result = await api('/api/nutrition/identify',{image:photo}); $('#nutrition-query').value = result.name; $('#identification').textContent = `${result.name} · ${result.confidence} confidence. ${result.explanation}\nConfirm or correct the name below before looking it up.`; });
+  if (action === 'identify') await work(state.hosted?'Identifying the food with hosted AI':'Identifying the food locally',async () => { const result = await api('/api/nutrition/identify',{image:photo}); $('#nutrition-query').value = result.name; $('#identification').textContent = `${result.name} · ${result.confidence} confidence. ${result.explanation}\nConfirm or correct the name below before looking it up.`; });
   if (action === 'nutrition-search') await nutritionSearch();
   if (action === 'choose-nutrition') await chooseNutrition(Number(button.dataset.index));
   if (action === 'settings') { const f = $('#settings-form'); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = ''; open('#settings-modal'); await checkStatus(); }
@@ -492,6 +502,23 @@ $('#photo-upload').addEventListener('change',e => loadPhoto(e.target.files[0]));
 $('#photo-modal').addEventListener('close',stopCamera);
 $$('[role=tab]').forEach((button,index,buttons) => button.addEventListener('keydown',event => { if (['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const next = buttons[(index+1)%buttons.length]; next.focus(); tab(next.dataset.tab); } }));
 $('#recipe-modal').addEventListener('cancel',event => { if (busy) { event.preventDefault(); notify('Wait for the current task to finish before closing.'); } });
+$('#import-box .import-content').insertAdjacentHTML('beforeend','<label class="upload-label">Upload a transcript or audio/video file you are allowed to use<input id="transcript-upload" type="file" accept=".txt,.mp3,.mp4,.mpeg,.mpga,.m4a,.ogg,.wav,.webm,.flac"></label>');
+$('#transcript-upload').addEventListener('change',async event=>{
+  const file=event.target.files[0];if(!file)return;
+  try{
+    if(file.size>24*1024*1024)throw new Error('Choose a file under 24 MB. Hosted audio is limited to ten minutes.');
+    await work('Reading your file and preparing its transcript',async()=>{
+      let text;
+      if(/\.txt$/i.test(file.name))text=await file.text();
+      else{
+        const response=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-App-Token':token,'X-File-Name':file.name.replace(/[^a-zA-Z0-9._-]/g,'_')},body:file});
+        const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not transcribe this file. Paste a transcript instead.');text=data.text;
+      }
+      $('#recipe-form').elements.source_text.value=text;showSourceLanguage();$('#recipe-message').textContent='Transcript loaded in its original language. Review it, then click Extract recipe with AI.';
+    });
+  }catch(error){notify(error.message,true);}
+  finally{event.target.value='';}
+});
 (async () => {
   try {
     await refresh();

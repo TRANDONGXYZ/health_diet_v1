@@ -21,6 +21,8 @@ IMAGE=re.compile(r'[a-f0-9]{64}\.png\Z')
 
 
 def config_path():
+    from . import hosted
+    if hosted.enabled():return hosted.config_path()
     return store.ROOT/'config.local.json'
 
 
@@ -41,8 +43,13 @@ def export_zip():
                 if IMAGE.fullmatch(path.name):
                     if path.is_symlink():raise ValueError('Photo links cannot be included in a backup.')
                     images[path.name]=path.read_bytes()
+        settings=ai.config()
+        from . import hosted
+        if hosted.enabled():
+            # Never export an operator's environment secrets with a tester backup.
+            settings['usda_api_key']=store.get('state','settings',{}).get('usda_api_key','DEMO_KEY')
         manifest={'format':'meal-notebook-backup','version':1,'created_at':datetime.now(timezone.utc).isoformat(),
-                  'tables':tables,'record_counts':{key:len(rows) for key,rows in tables.items()},'settings':ai.config(),'images':list(images)}
+                  'tables':tables,'record_counts':{key:len(rows) for key,rows in tables.items()},'settings':settings,'images':list(images)}
         validate_data(manifest,images)
         data=json_bytes(manifest)
         if len(data)>MAX_JSON or len(data)+sum(map(len,images.values()))>MAX_EXPANDED:
@@ -65,11 +72,14 @@ def object_pairs(pairs):
 
 
 def read_zip(raw):
-    if not raw or len(raw)>MAX_ARCHIVE:raise ValueError('Choose a ZIP backup under 256 MB.')
+    from . import hosted
+    expanded_limit=48*1024*1024 if hosted.enabled() else MAX_EXPANDED
+    json_limit=12*1024*1024 if hosted.enabled() else MAX_JSON
+    if not raw or len(raw)>(48*1024*1024 if hosted.enabled() else MAX_ARCHIVE):raise ValueError('Choose a ZIP backup under '+('48' if hosted.enabled() else '256')+' MB.')
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             entries=archive.infolist();names=[item.filename for item in entries]
-            if len(entries)>10000 or len(names)!=len(set(names)) or sum(i.file_size for i in entries)>MAX_EXPANDED:
+            if len(entries)>10000 or len(names)!=len(set(names)) or sum(i.file_size for i in entries)>expanded_limit:
                 raise ValueError('Duplicate entries or excessive expanded backup size.')
             if MANIFEST not in names:raise ValueError('Missing versioned backup-v1.json file.')
             for item in entries:
@@ -81,7 +91,7 @@ def read_zip(raw):
                     raise ValueError('Unexpected file or unsafe path in backup.')
                 if item.is_dir() or item.compress_type not in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):
                     raise ValueError('Unsupported archive entry.')
-                if item.file_size>(MAX_JSON if name==MANIFEST else 4_000_000):
+                if item.file_size>(json_limit if name==MANIFEST else 4_000_000):
                     raise ValueError('An archive entry is too large.')
             manifest=json.loads(archive.read(MANIFEST).decode('utf-8'),object_pairs_hook=object_pairs,
                                 parse_constant=lambda value:(_ for _ in ()).throw(ValueError('Invalid number in backup.')))
@@ -249,8 +259,8 @@ def apply_validated(data,images,serialized):
                 for table in TABLES:
                     connection.execute(f'DELETE FROM {table}')
                     connection.executemany(f'INSERT INTO {table} VALUES (?,?)',serialized[table])
-            store.EPOCH+=1
-            plan_jobs.JOBS.clear()
+            store.bump_epoch()
+            plan_jobs.clear_current()
         except Exception as exc:
             if new_config:os.replace(config,stage/'failed-config.json')
             if old_config:os.replace(stage/'old-config.json',config)
