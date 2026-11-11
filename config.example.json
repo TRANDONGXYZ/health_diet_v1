@@ -1,0 +1,18 @@
+{
+  "text_model": "qwen2.5:1.5b",
+  "vision_model": "qwen3.5:0.8b",
+  "ollama_url": "http://127.0.0.1:11434",
+  "usda_api_key": "DEMO_KEY",
+  "language": "auto",
+  "vietnamese_model": "qwen2.5:1.5b",
+  "english_model": "llama3.2:1b",
+  "context_size": 8192,
+  "ai_timeout_seconds": 900,
+  "ai_read_timeout_seconds": 180,
+  "speech_model": "base",
+  "speech_language": "auto",
+  "speech_threads": 4,
+  "speech_timeout_seconds": 1800,
+  "speech_max_video_minutes": 60,
+  "video_download_timeout_seconds": 300
+}
