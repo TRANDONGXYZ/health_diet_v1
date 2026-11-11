@@ -1,6 +1,7 @@
 """Hosted HTTP behavior against explicit Supabase/Groq doubles (no live keys)."""
 import base64
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,15 @@ class SupabaseDouble:
             self.rows[uid] = {'revision':revision+1, 'document':copy.deepcopy(data['new_document'])}
             return revision+1
         if path == '/rest/v1/rpc/health_beta_take_ai':return self.allowed
+        if path == '/rest/v1/rpc/health_beta_delete_week':
+            row=self.rows.get(uid)
+            if self.fail_save:raise ValueError('Storage is offline')
+            if not row:raise hosted.HostedServiceError('Week not found','week_not_found',400)
+            plans=row['document']['tables']['plans'];week=data['target_week']
+            if not any(plan['id']==week for plan in plans):raise hosted.HostedServiceError('Week not found','week_not_found',400)
+            row['document']['tables']['plans']=[plan for plan in plans if plan['id']!=week]
+            row['revision']+=1
+            return {'ok':True,'week_start':week}
         if path.startswith('/storage/v1/object/'):
             key = path.split('health-diet-images/')[1]
             self.assert_owner(key.split('/')[0], uid)
@@ -59,6 +69,7 @@ class HostedHTTPTests(unittest.TestCase):
             'SESSION_SECRET':'s'*64,'GROQ_API_KEY':'operator-groq-secret','USDA_API_KEY':'operator-usda-secret'})
         self.environment.start();self.addCleanup(self.environment.stop)
         self.upstream=SupabaseDouble()
+        self.original_remote=hosted.remote
         self.remote=patch.object(hosted,'remote',side_effect=self.upstream.call);self.remote.start();self.addCleanup(self.remote.stop)
         self.original_sessions=hosted.SESSIONS.copy();hosted.SESSIONS.clear();hosted.SIGNUPS.clear()
         self.server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
@@ -151,6 +162,58 @@ class HostedHTTPTests(unittest.TestCase):
         self.assertEqual(self.http('/api/healthz',cookie=cookie)[0],404)
         self.assertEqual(self.http('/healthz')[0],200)
 
+    def test_initial_load_explains_disabled_anonymous_signins_without_leaking_provider_body(self):
+        # Exercise the real HTTP adapter, rather than mocking remote's final result.
+        secret='provider-body-must-stay-private'
+        response={'error_code':'anonymous_provider_disabled','msg':secret}
+        error=urllib.error.HTTPError('https://project.supabase.co/auth/v1/signup',422,'Unprocessable Entity',{},io.BytesIO(json.dumps(response).encode()))
+        with patch.object(hosted.urllib.request,'urlopen',side_effect=error),self.assertLogs(hosted.LOG,level='WARNING') as logs:
+            # The HTTP client above also uses urllib: call the real adapter directly
+            # here, then send its sanitized exception through the app's HTTP flow.
+            with self.assertRaises(hosted.HostedServiceError) as raised:
+                self.original_remote('/auth/v1/signup',{})
+        with patch.object(hosted,'remote',side_effect=raised.exception):
+            code,body,_=self.http('/api/state')
+        self.assertEqual(code,503)
+        self.assertEqual(body['code'],'anonymous_signins_disabled')
+        self.assertIn('enable Anonymous Sign-Ins',body['error'])
+        self.assertNotIn(secret,json.dumps(body))
+        self.assertIn('anonymous_provider_disabled',' '.join(logs.output))
+        self.assertNotIn(secret,' '.join(logs.output))
+
+    def test_week_delete_is_one_durable_rpc_without_waiting_for_workspace_load(self):
+        cookie,token=self.create_tester()
+        from datetime import date,timedelta
+        before=self.http('/api/state',cookie=cookie)[1]
+        week=(date.fromisoformat(before['calendar']['week_start'])+timedelta(weeks=1)).isoformat()
+        self.assertEqual(self.http('/api/plan/add',{'week_start':week},cookie=cookie,csrf=token)[0],200)
+        session=next(iter(hosted.SESSIONS.values()))
+        hosted.remote.reset_mock()
+        # Reproduce an image request owning the workspace lock: delete must use
+        # the atomic RPC, without loading/rewriting the unrelated workspace.
+        with session.lock,patch.object(hosted,'load',side_effect=AssertionError('Delete must not hydrate the workspace')):
+            code,body,headers=self.http('/api/plan/delete',{'week_start':week},cookie=cookie,csrf=token)
+        self.assertEqual(code,200,body);self.assertEqual(body['week_start'],week)
+        self.assertEqual([call.args[0] for call in hosted.remote.call_args_list],['/rest/v1/rpc/health_beta_delete_week'])
+        self.assertIn('Server-Timing',headers)
+        self.assertIn('total;dur=',headers['Server-Timing'])
+        after=self.http('/api/state',cookie=cookie)[1]
+        self.assertFalse(any(plan['week_start']==week for plan in after['plans']))
+        self.assertEqual(after['recipes'],before['recipes'])
+
+    def test_week_delete_falls_back_safely_until_new_sql_is_installed(self):
+        cookie,token=self.create_tester()
+        from datetime import date,timedelta
+        before=self.http('/api/state',cookie=cookie)[1]
+        week=(date.fromisoformat(before['calendar']['week_start'])+timedelta(weeks=1)).isoformat()
+        self.http('/api/plan/add',{'week_start':week},cookie=cookie,csrf=token)
+        def remote(path,*args,**kwargs):
+            if path=='/rest/v1/rpc/health_beta_delete_week':raise hosted.HostedServiceError('Missing function','supabase_function_missing')
+            return self.upstream.call(path,*args,**kwargs)
+        with patch.object(hosted,'remote',side_effect=remote):
+            self.assertEqual(self.http('/api/plan/delete',{'week_start':week},cookie=cookie,csrf=token)[0],200)
+        self.assertFalse(any(plan['week_start']==week for plan in self.http('/api/state',cookie=cookie)[1]['plans']))
+
     def test_async_jobs_and_progress_belong_only_to_their_tester(self):
         a,ta=self.create_tester();b,tb=self.create_tester()
         self.http('/api/recipes',{'name':'Tofu','ingredients':[{'name':'tofu','grams':100}]},cookie=a,csrf=ta)
@@ -170,6 +233,20 @@ class HostedHTTPTests(unittest.TestCase):
         self.sessions+=list(hosted.SESSIONS.values());hosted.SESSIONS.clear()
         self.assertIsNotNone(self.http('/api/state',cookie=a)[1]['plan'])
         self.assertIsNone(self.http('/api/state',cookie=b)[1]['plan'])
+
+
+class SupabaseErrorTests(unittest.TestCase):
+    def test_known_setup_failures_have_actionable_safe_messages(self):
+        cases=[('/auth/v1/signup',401,{},'supabase_key_rejected'),
+               ('/rest/v1/health_beta_data?select=document',404,{'code':'PGRST205'},'supabase_table_missing'),
+               ('/rest/v1/rpc/health_beta_save',404,{'code':'PGRST202'},'supabase_function_missing'),
+               ('/rest/v1/health_beta_data',403,{'code':'42501'},'supabase_access_denied'),
+               ('/auth/v1/signup',429,{},'supabase_rate_limited')]
+        for path,status,payload,expected in cases:
+            with self.subTest(expected=expected),self.assertLogs(hosted.LOG,level='WARNING') as logs:
+                result=hosted.provider_error(path,status,{**payload,'message':'private-provider-payload'})
+            self.assertEqual(result.code,expected)
+            self.assertNotIn('private-provider-payload',str(result)+' '.join(logs.output))
 
 
 class GroqAdapterTests(unittest.TestCase):

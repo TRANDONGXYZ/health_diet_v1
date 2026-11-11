@@ -72,6 +72,14 @@ ZIP export/import retains the existing versioned `backup-v1.json` plus `images/`
 
 ## Verification and handoff
 
+For the weekly-delete latency fix, rerun the updated `supabase/beta.sql` to add
+`health_beta_delete_week`, then deploy the updated backend and frontend together.
+See [PERFORMANCE.md](PERFORMANCE.md) for measured causes, timing commands,
+`Server-Timing`/Render Logs, and warm versus idle tests. Existing databases work
+during rollout through a slower compatibility path until the new function exists.
+
+If deployment succeeds but the app cannot load, check **Supabase Authentication → Sign In / Providers → Anonymous Sign-Ins** first: enable it and save. Merely creating the SQL tables does not enable anonymous authentication. On updated builds, startup errors identify disabled sign-ins, a mismatched project key, a missing table/function, access-policy failures, or rate limits. Render Logs include only the operation, HTTP status and recognized provider error code, never API keys, cookies or raw provider responses. If a SQL object is missing, rerun the complete updated `supabase/beta.sql` in the same project as `SUPABASE_URL`. Preserve `SESSION_SECRET` and existing browser cookies.
+
 Offline checks (no real credentials, no personal data):
 
 ```powershell

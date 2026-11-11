@@ -41,7 +41,13 @@ with tempfile.TemporaryDirectory(prefix='health-beta-restart-') as folder:
         photo,_=request('/api/dish-photo',{'filename':'dish.png','image':base64.b64encode(png()).decode()},cookie,token)
         request('/api/recipes',{'name':'Restart test soup','photo_url':photo['photo_url'],'servings':2,'ingredients':[{'name':'tofu','grams':200}]},cookie,token)
         request('/api/plan/generate',{'method':'rotation'},cookie,token)
+        from datetime import date,timedelta
+        current=request('/api/state',cookie=cookie)[0]
+        deleted_week=(date.fromisoformat(current['calendar']['week_start'])+timedelta(weeks=1)).isoformat()
+        request('/api/plan/add',{'week_start':deleted_week},cookie,token)
+        request('/api/plan/delete',{'week_start':deleted_week},cookie,token)
         before,_=request('/api/state',cookie=cookie)
+        assert all(plan['week_start']!=deleted_week for plan in before['plans'])
         backup,_=request('/api/backup/export',cookie=cookie)
         process.terminate();process.wait(timeout=5)
         startup=process.stdout.read().decode();assert '0.0.0.0:'+str(port) in startup,startup

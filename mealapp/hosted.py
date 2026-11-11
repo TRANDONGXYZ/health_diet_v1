@@ -6,12 +6,13 @@ commit there. Storage objects are private and use the tester's JWT, never an
 administrative key.
 """
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import hashlib
 import hmac
 from http.cookies import SimpleCookie
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ import urllib.request
 import uuid
 
 CURRENT = ContextVar('health_tester', default=None)
+TIMINGS = ContextVar('health_request_timings', default=None)
 SESSIONS = {}
 SESSION_LOCK = threading.RLock()
 SIGNUPS = {}
@@ -32,6 +34,60 @@ TABLES = ('foods', 'recipes', 'state', 'cache', 'plans')
 IMAGE = re.compile(r'[a-f0-9]{64}\.png\Z')
 MAX_DOCUMENT = 12 * 1024 * 1024
 MAX_PHOTOS = 32 * 1024 * 1024
+LOG = logging.getLogger('mealapp.hosted')
+
+
+class HostedServiceError(ValueError):
+    """A deliberately safe public message, never a raw provider response."""
+    def __init__(self, message, code='hosted_unavailable', status=503):
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
+def operation(path):
+    if path.startswith('/auth/v1/signup'):return 'anonymous_signup'
+    if path.startswith('/auth/v1/token'):return 'session_refresh'
+    if path.startswith('/rest/v1/rpc/health_beta_save'):return 'records_save'
+    if path.startswith('/rest/v1/rpc/health_beta_delete_week'):return 'week_delete'
+    if path.startswith('/rest/v1/rpc/health_beta_take_ai'):return 'ai_budget'
+    if path.startswith('/rest/v1/health_beta_data'):return 'records_read'
+    if path.startswith('/storage/'):return 'image_storage'
+    return 'supabase_request'
+
+
+def provider_error(path, status, payload):
+    """Map only known codes to our own text; discard provider messages/URLs."""
+    stage=operation(path)
+    code=str(payload.get('error_code') or payload.get('code') or '') if isinstance(payload,dict) else ''
+    known={'anonymous_provider_disabled','signup_disabled','captcha_failed','over_request_rate_limit',
+           'over_anonymous_request_rate_limit','PGRST202','PGRST205','42P01','42501','PGRST106','PGRST301','PGRST302'}
+    safe_code=code if code in known else 'unrecognized'
+    LOG.warning('Supabase request failed: operation=%s http_status=%s code=%s',stage,status,safe_code)
+    if code=='anonymous_provider_disabled':
+        return HostedServiceError('Anonymous Sign-Ins are disabled in Supabase. In your Supabase project, open Authentication > Sign In / Providers, enable Anonymous Sign-Ins and save, then reload this page.', 'anonymous_signins_disabled')
+    if code=='signup_disabled':
+        return HostedServiceError('Supabase is blocking new tester sessions. Enable new user sign-ups and Anonymous Sign-Ins in the project authentication settings, then reload.', 'signups_disabled')
+    if code=='captcha_failed':
+        return HostedServiceError('Supabase requires a CAPTCHA for anonymous sign-in, but this beta does not send CAPTCHA tokens. The operator must reconcile the Supabase CAPTCHA setting with this beta setup.', 'captcha_required')
+    if status==429:
+        return HostedServiceError('Supabase temporarily limited requests or new anonymous sessions. Reuse your existing session and try later. Repeated reloads will not bypass the limit.', 'supabase_rate_limited',429)
+    if status==401 and stage=='anonymous_signup':
+        return HostedServiceError('Supabase rejected the project API key. In Render, set SUPABASE_PUBLISHABLE_KEY to the publishable key from the same Supabase project as SUPABASE_URL, then redeploy.', 'supabase_key_rejected')
+    if code in {'PGRST205','42P01'} or status==404 and stage=='records_read':
+        return HostedServiceError('The Supabase health_beta_data table is missing from the Data API. Run the complete updated supabase/beta.sql in the project matching SUPABASE_URL and make sure the public schema is exposed.', 'supabase_table_missing')
+    if code=='PGRST202' or status==404 and stage in {'records_save','ai_budget'}:
+        return HostedServiceError('A required Supabase beta function is missing from the Data API. Run the complete updated supabase/beta.sql in the project matching SUPABASE_URL, then retry.', 'supabase_function_missing')
+    if status==404 and stage=='week_delete':
+        return HostedServiceError('This weekly plan no longer exists. Reload the page.', 'week_not_found',400)
+    if code=='42501' or status==403 and stage in {'records_read','records_save','week_delete','image_storage'}:
+        return HostedServiceError('Supabase denied access to this tester workspace. Run the complete supabase/beta.sql to install the authenticated-user grants and owner policies. Do not make tables or the image bucket public.', 'supabase_access_denied')
+    if code=='PGRST106':
+        return HostedServiceError('Supabase is not exposing the required public schema. Enable the Data API for public in this project and rerun supabase/beta.sql.', 'supabase_schema_not_exposed')
+    if status in (401,403):
+        return HostedServiceError('Supabase could not verify this anonymous session. Check that the project URL and publishable key belong to the same project. Keep SESSION_SECRET unchanged and preserve browser cookies.', 'supabase_session_rejected')
+    if status==409:
+        return HostedServiceError('Data changed in another deployment. Reload and retry; the newer saved data was kept.', 'supabase_revision_conflict',409)
+    return HostedServiceError('Supabase failed during '+stage.replace('_',' ')+' (HTTP '+str(status)+'). Check the matching safe error in Render Logs and the Supabase project status. No successful save was acknowledged.', 'supabase_request_failed')
 
 
 def enabled():
@@ -79,6 +135,17 @@ def origin_allowed(handler):
 
 
 def remote(path, data=None, *, token=None, method=None, raw=False):
+    started=time.monotonic()
+    try:return _remote_request(path,data,token=token,method=method,raw=raw)
+    finally:
+        stats=TIMINGS.get()
+        if stats is not None:
+            name=operation(path)
+            stats[name]=stats.get(name,0)+(time.monotonic()-started)*1000
+            stats[name+'_calls']=stats.get(name+'_calls',0)+1
+
+
+def _remote_request(path, data=None, *, token=None, method=None, raw=False):
     headers = {'apikey': os.environ['SUPABASE_PUBLISHABLE_KEY'], 'Content-Type':'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
@@ -96,16 +163,14 @@ def remote(path, data=None, *, token=None, method=None, raw=False):
                 raise ValueError('Hosted data exceeds the beta storage limit. Export a backup and reduce saved data.')
             return result if raw else json.loads(result or b'null')
     except urllib.error.HTTPError as exc:
-        # Do not return provider bodies, bearer tokens or configuration to clients.
-        if exc.code == 429:
-            raise ValueError('The beta service quota is temporarily exhausted. Please try later. Manual actions remain available when storage is reachable.') from None
-        if exc.code in (401, 403):
-            raise ValueError('Your anonymous session or Supabase access policy could not be verified. Reload the app; do not clear browser cookies.') from None
-        if exc.code == 409:
-            raise ValueError('Data changed in another deployment. Reload and retry; the newer saved data was kept.') from None
-        raise ValueError('Durable storage is unavailable or not configured. Nothing was acknowledged as saved. Please retry.') from None
+        try:
+            payload=json.loads(exc.read(16384))
+        except (ValueError,OSError):payload={}
+        finally:exc.close()
+        raise provider_error(path,exc.code,payload) from None
     except (OSError, TimeoutError, json.JSONDecodeError):
-        raise ValueError('Durable storage is unavailable. Please retry; do not clear browser cookies.') from None
+        LOG.warning('Supabase connection or response failed: operation=%s',operation(path))
+        raise HostedServiceError('Could not reach Supabase during '+operation(path).replace('_',' ')+'. Check that the project is active and SUPABASE_URL is its API origin (https://PROJECT_REF.supabase.co), then retry. Keep browser cookies.', 'supabase_unreachable') from None
 
 
 class Session:
@@ -152,7 +217,7 @@ def identity_for(handler, create=False):
         else:
             identity = None
     except Exception:
-        raise ValueError('The tester session cookie is invalid. Restore the original cookie or use a separate browser profile for a new session.') from None
+        raise HostedServiceError('The tester session cookie is invalid. Keep SESSION_SECRET identical to its previous deployment value and reload. Preserve browser cookies to avoid losing access to an existing workspace.', 'session_cookie_invalid') from None
     if identity and identity['expires_at'] <= time.time() + 90:
         result = remote('/auth/v1/token?grant_type=refresh_token', {'refresh_token':identity['refresh_token']})
         if result['user']['id'] != identity['uid']:
@@ -168,7 +233,7 @@ def identity_for(handler, create=False):
             now = time.monotonic()
             recent = [t for t in SIGNUPS.get(address, []) if t > now - 3600]
             if len(recent) >= 20:
-                raise ValueError('Too many new tester sessions. Reuse your browser session or try again later.')
+                raise HostedServiceError('Too many new tester sessions were attempted from this connection. Try again after an hour. Check that Supabase Anonymous Sign-Ins are enabled before retrying.', 'signup_rate_limited',429)
             SIGNUPS[address] = recent + [now]
         identity = identity_from_auth(remote('/auth/v1/signup', {}))
         handler.session_cookie = cookie(identity)
@@ -272,6 +337,42 @@ def reserve_ai(audio=False):
             raise ValueError('The public beta AI usage limit has been reached. Try later. Manual editing, Simple Rotation and Randomize are still available.')
 
 
+def delete_week(week):
+    from . import weekly, plan_jobs
+    weekly.week_date(week)
+    def check_job():
+        job=plan_jobs.active()
+        if job and job['week_start']==week:
+            raise ValueError('Cancel AI generation for this week before changing its plan.')
+    with plan_jobs.LOCK:
+        check_job()
+        try:
+            return remote('/rest/v1/rpc/health_beta_delete_week',{'target_week':week},token=current().token)
+        except HostedServiceError as exc:
+            if exc.code!='supabase_function_missing':raise
+    # Backwards-compatible during rollout: a project that has not run the new
+    # SQL keeps the old, slower durable path. It never reports a local-only save.
+    with write_scope(),plan_jobs.LOCK:
+        check_job()
+        weekly.history()
+        result=weekly.delete(week)
+        persist()
+        return result
+
+
+def send_timed_response(response, output, stats):
+    """Add timings after durable commit; callback headers were buffered earlier."""
+    response.seek(0)
+    lines=[]
+    while True:
+        line=response.readline(65536)
+        if line in (b'\r\n',b'\n',b''):break
+        lines.append(line)
+    timings=', '.join(name+';dur='+format(value,'.1f') for name,value in stats.items() if not name.endswith('_calls'))
+    output.write(b''.join(lines)+('Server-Timing: '+timings+'\r\n\r\n').encode('ascii'))
+    while block:=response.read(65536):output.write(block)
+
+
 def serve(handler, callback):
     """Buffer the response until the user's durable commit succeeds."""
     route = urllib.parse.urlsplit(handler.path).path
@@ -282,26 +383,47 @@ def serve(handler, callback):
     if handler.command == 'GET' and route in ('/', '/index.html', '/app.js', '/style.css'):
         return callback()
     original = handler.wfile
+    fast_delete=handler.command=='POST' and route=='/api/plan/delete'
+    stats={}
+    timing_scope=TIMINGS.set(stats)
+    started=time.monotonic()
     try:
+        stage=time.monotonic()
         session = identity_for(handler, create=handler.command == 'GET' and route == '/api/state')
+        stats['identity']=(time.monotonic()-stage)*1000
         scope = CURRENT.set(session)
         try:
-            with session.lock, tempfile.SpooledTemporaryFile(max_size=1024*1024) as response:
-                load(session)
+            stage=time.monotonic()
+            with (nullcontext() if fast_delete else session.lock), tempfile.SpooledTemporaryFile(max_size=1024*1024) as response:
+                stats['lock_wait']=(time.monotonic()-stage)*1000
+                stage=time.monotonic()
+                if not fast_delete:load(session)
+                stats['load']=(time.monotonic()-stage)*1000
                 handler.wfile = response
+                stage=time.monotonic()
                 callback()
-                if getattr(handler, 'response_code', 500) < 400:
+                stats['action']=(time.monotonic()-stage)*1000
+                stage=time.monotonic()
+                if not fast_delete and getattr(handler, 'response_code', 500) < 400:
                     persist()
-                response.seek(0)
+                stats['persist']=(time.monotonic()-stage)*1000
+                stats['total']=(time.monotonic()-started)*1000
                 handler.wfile = original
-                while block := response.read(65536):
-                    original.write(block)
-                session.document=None
+                send_timed_response(response,original,stats)
+                if not fast_delete:session.document=None
         finally:
             CURRENT.reset(scope)
-    except (ValueError, OSError, KeyError, TypeError):
+    except (ValueError, OSError, KeyError, TypeError) as exc:
         handler.wfile = original
         handler._headers_buffer = []
-        handler.reply({'error':'The hosted session or durable storage is unavailable. Reload and retry; no successful save was acknowledged.'}, 503)
+        if isinstance(exc,HostedServiceError):
+            handler.reply({'error':str(exc),'code':exc.code},exc.status)
+        else:
+            # No raw exception text: malformed records can contain private data.
+            LOG.warning('Hosted workspace failed: exception_type=%s',type(exc).__name__)
+            handler.reply({'error':'The hosted workspace could not be loaded or saved. Check Render Logs for the safe error category; no successful save was acknowledged.','code':'hosted_workspace_failed'},503)
     finally:
         handler.wfile = original
+        if route=='/api/plan/delete':
+            LOG.info('Week delete timing: %s',json.dumps({name:round(value,1) for name,value in stats.items()},sort_keys=True))
+        TIMINGS.reset(timing_scope)

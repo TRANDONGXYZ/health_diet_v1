@@ -116,13 +116,13 @@ async function run(){
   assert.match(await page.locator('#dish-detail').innerText(),/Dish deleted/);assert.doesNotMatch(await page.locator('#dish-detail').innerText(),/Running tofu|Ingredients|kcal/);assert.equal(await page.locator('#dish-detail [data-action=edit]').count(),0);
   assert.equal((await page.request.get(origin+oldPhotoPath)).status(),200);
   await page.getByRole('button',{name:'Close recipe details'}).click();
-  await page.locator('.past-week').last().getByRole('button',{name:/Delete week/}).click();
+  page.once('dialog',dialog=>dialog.accept());await page.locator('.past-week').last().getByRole('button',{name:/Delete week/}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.past-week').length===2);
   await page.reload();await page.locator('.past-week').first().waitFor();assert.equal(await page.locator('.past-week').count(),2);
   assert.equal((await page.evaluate(async()=>await(await fetch('/api/state')).json())).recipes.length,1);
   assert.equal((await api('/api/plan/start',{week_start:'2026-11-09'})).status,400);
   await generate();await settled();assert.equal(await page.locator('#week-grid .meal-card').count(),4);
-  await page.locator('#delete-current-week').click();await page.waitForFunction(()=>document.querySelectorAll('#week-grid .meal-card').length===0);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#delete-current-week').click();await page.waitForFunction(()=>document.querySelectorAll('#week-grid .meal-card').length===0);
   assert.equal(await page.locator('.past-week').count(),2);
   assert.equal((await page.evaluate(async()=>await(await fetch('/api/state')).json())).recipes.length,1);
   fs.mkdirSync('test-results',{recursive:true});await page.screenshot({path:'test-results/weekly-history.png',fullPage:true});

@@ -49,6 +49,9 @@ def start(data):
                 del JOBS[key]
         JOBS[job["id"]] = job
         def run():
+            # A background job inherits the tester identity, not the mutable
+            # HTTP response's timing accumulator.
+            hosted.TIMINGS.set(None)
             try:
                 with ai.cancellation_scope(token):
                     result = weekly.build(dict(data,method="AI",week_start=context["week_start"]))
@@ -90,6 +93,7 @@ def instant(data):
 
 
 def edit_week(data, delete=False):
+    if delete and hosted.enabled():return hosted.delete_week(data.get('week_start'))
     weekly.history()
     with LOCK:
         running = active()

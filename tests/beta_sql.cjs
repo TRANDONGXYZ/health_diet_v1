@@ -54,6 +54,20 @@ async function run(){
     assert.equal(await value('select public.health_beta_take_ai(false)'),true,'Other tester retains their own daily allowance');
     await db.exec("reset role; update public.health_beta_usage set used=200 where scope='day:global'; set role authenticated;");
     assert.equal(await value('select public.health_beta_take_ai(false)'),false,'Global daily cap applies to every tester');
+    const week='2026-11-16',otherWeek='2026-11-23';
+    const document={tables:{plans:[{id:week,body:{week_start:week,days:[]}},{id:otherWeek,body:{week_start:otherWeek,days:[]}}],recipes:[{id:'recipe',body:{name:'Keep me'}}],state:[{id:'week_expansion',body:{[week]:false}}],foods:[],cache:[]},images:['keep.png'],config:{keep:'settings'}};
+    await value('select public.health_beta_save(0,$1::jsonb)',[JSON.stringify(document)]); // Tester B.
+    await db.exec(`select set_config('request.jwt.claim.sub','${a}',false);`);
+    await value('select public.health_beta_save(2,$1::jsonb)',[JSON.stringify(document)]);
+    const deleted=await value('select public.health_beta_delete_week($1)',[week]);
+    assert.deepEqual(deleted,{ok:true,week_start:week});
+    const expected=structuredClone(document);expected.tables.plans=expected.tables.plans.filter(plan=>plan.id!==week);
+    assert.deepEqual(await value('select document from public.health_beta_data'),expected);
+    await assert.rejects(db.query('select public.health_beta_save(3,$1::jsonb)',[JSON.stringify(document)]),error=>error.code==='PT409','A stale full save cannot resurrect the deleted week');
+    await assert.rejects(db.query('select public.health_beta_delete_week($1)',[week]),error=>error.code==='PT404');
+    await assert.rejects(db.query("select public.health_beta_delete_week('2026-11-17')"),error=>error.code==='22023');
+    await db.exec(`select set_config('request.jwt.claim.sub','${b}',false);`);
+    assert.deepEqual(await value('select document from public.health_beta_data'),document,'Tester B is unchanged');
     console.log('PASS: reproduced original 42601; fixed full migration compiles and reruns in PostgreSQL; revision checks, owner policies and minute/daily/global AI limits execute correctly. Supabase schemas are test fixtures.');
   }finally{await db.close();}
 }

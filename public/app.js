@@ -330,8 +330,18 @@ async function replaceMeal() {
   finally {weekMutationPending=false;}
 }
 async function deleteWeek(button) {
-  if(weekMutationPending||busy)return;weekMutationPending=true;button.disabled=true;
-  try {await api('/api/plan/delete',{week_start:button.dataset.week});await refresh();notify('Weekly plan deleted. Your saved recipes were kept.');}
+  if(weekMutationPending||busy)return;
+  const week=button.dataset.week;weekMutationPending=true;
+  if(!confirm(`Delete the meal plan for ${weekRange(week)}? Your saved dishes will be kept.`)){weekMutationPending=false;return;}
+  button.disabled=true;++refreshVersion;
+  try {
+    await api('/api/plan/delete',{week_start:week});
+    // The server has durably committed before acknowledging this response.
+    // Remove only that week; a full state reload adds an avoidable storage trip.
+    ++refreshVersion;state.plans=(state.plans||[]).filter(plan=>plan.week_start!==week);
+    if(state.plan?.week_start===week)state.plan=null;
+    renderWeek();notify('Weekly plan deleted. Your saved recipes were kept.');
+  }
   catch(error){button.disabled=false;notify(error.message,true);}
   finally {weekMutationPending=false;}
 }
@@ -525,11 +535,11 @@ $('#transcript-upload').addEventListener('change',async event=>{
     $('#plan-vegan').checked=!!state.plan?.vegan_only;$('#plan-running').checked=!!state.plan?.prioritize_running;
     if(state.plan_job)followPlanJob(state.plan_job);
     await checkStatus();
-    setInterval(async()=>{if(!busy&&!planJobId){try{await refresh();}catch{}}},60000);
+    setInterval(async()=>{if(!busy&&!planJobId&&!weekMutationPending){try{await refresh();}catch{}}},60000);
   } catch (error) { notify('Could not load the app: '+error.message,true); }
 })();
 
-window.addEventListener('focus',async()=>{if(!busy&&!planJobId){try{await refresh();}catch{}}});
+window.addEventListener('focus',async()=>{if(!busy&&!planJobId&&!weekMutationPending){try{await refresh();}catch{}}});
 
 $('#replace-search').addEventListener('input',renderReplacementList);
 $('#replace-modal').addEventListener('cancel',event=>{if(weekMutationPending)event.preventDefault();});

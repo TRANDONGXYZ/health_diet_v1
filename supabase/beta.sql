@@ -29,6 +29,35 @@ end $$;
 revoke all on function public.health_beta_save(bigint,jsonb) from public, anon;
 grant execute on function public.health_beta_save(bigint,jsonb) to authenticated;
 
+-- Delete just one weekly plan without downloading/replacing the tester's whole
+-- document. Row locking and the revision bump protect concurrent full saves.
+create or replace function public.health_beta_delete_week(target_week text)
+returns jsonb language plpgsql security invoker set search_path = public, pg_temp as $$
+declare changed_revision bigint;
+begin
+  if auth.uid() is null then raise exception 'Authentication required'; end if;
+  if target_week is null or target_week !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+     or extract(isodow from target_week::date) <> 1 then
+    raise sqlstate '22023' using message = 'Choose a week starting on Monday';
+  end if;
+  update public.health_beta_data as workspace
+    set document = jsonb_set(workspace.document, '{tables,plans}',
+      (select coalesce(jsonb_agg(entry.value order by entry.ordinality), '[]'::jsonb)
+       from jsonb_array_elements(workspace.document #> '{tables,plans}') with ordinality as entry(value, ordinality)
+       where entry.value->>'id' <> target_week)),
+        revision = workspace.revision + 1
+    where workspace.user_id = auth.uid()
+      and exists (select 1 from jsonb_array_elements(workspace.document #> '{tables,plans}') as entry
+                  where entry->>'id' = target_week)
+    returning revision into changed_revision;
+  if changed_revision is null then
+    raise sqlstate 'PT404' using message = 'This weekly plan no longer exists; reload';
+  end if;
+  return jsonb_build_object('ok',true,'week_start',target_week);
+end $$;
+revoke all on function public.health_beta_delete_week(text) from public, anon;
+grant execute on function public.health_beta_delete_week(text) to authenticated;
+
 insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
   values('health-diet-images', 'health-diet-images', false, 4000000, array['image/png'])
   on conflict(id) do update set public = false, file_size_limit = 4000000, allowed_mime_types = array['image/png'];

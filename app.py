@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -325,6 +326,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO,format='%(levelname)s %(name)s: %(message)s')
     parser = argparse.ArgumentParser(description="Local recipe and weekly meal planner")
     parser.add_argument("--port", type=int, default=int(os.environ.get('PORT',8765)))
     parser.add_argument("--host", default='0.0.0.0' if hosted.enabled() else '127.0.0.1')
