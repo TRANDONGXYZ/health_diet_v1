@@ -67,6 +67,8 @@ let pageScrollLock=null;
 const dialogOrigins=new WeakMap();
 function open(id,initialFocus=null) {
   const dialog=$(id);if(dialog.open)return;
+  // Native close events are queued; reopening must not outrun their cleanup.
+  if(dialogSessions.has(dialog))finishDialogClose(dialog);
   if(!pageScrollLock){pageScrollLock={x:scrollX,y:scrollY};document.documentElement.classList.add('modal-open');document.body.classList.add('modal-open');}
   dialogOrigins.set(dialog,$$('dialog[open]').map(parent=>({parent,top:parent.scrollTop,left:parent.scrollLeft})));
   dialogSessions.set(dialog,new AbortController());
@@ -595,6 +597,10 @@ window.addEventListener('focus',async()=>{if(!busy&&!planJobId&&!weekMutationPen
 
 $('#replace-search').addEventListener('input',renderReplacementList);
 $('#replace-modal').addEventListener('cancel',event=>{if(weekMutationPending)event.preventDefault();});
+$$('dialog').forEach(dialog=>dialog.addEventListener('cancel',event=>{
+  if(event.defaultPrevented)return;
+  event.preventDefault();closeDialog(dialog);
+}));
 
 document.addEventListener('change',event=>{const input=event.target;if(!input.matches('input[data-pref]'))return;const week=input.dataset.week,panel=input.closest('.weekly-controls');weekPreferences.set(week,{vegan_only:$('input[data-pref=vegan_only]',panel).checked,prioritize_running:$('input[data-pref=prioritize_running]',panel).checked});});
 function rememberWeekExpansion(event){
@@ -649,5 +655,6 @@ $('#sync-conflict').addEventListener('click',()=>{
   $('#sync-conflict-message').textContent=(syncConflict?.conflict?.message||'This record changed elsewhere.')+' Your unsynced edit is still saved on this device. Keep local retries your edit against the current version; a deleted recipe is saved as a new dish. Use server explicitly discards this pending operation.';
   open('#sync-conflict-modal');
 });
-$('#keep-local-conflict').addEventListener('click',async()=>{try{await HealthLocal.resolveConflict(true);closeDialog($('#sync-conflict-modal'));}catch(error){notify(error.message,true);}});
-$('#use-server-conflict').addEventListener('click',async()=>{try{await HealthLocal.resolveConflict(false);closeDialog($('#sync-conflict-modal'));}catch(error){notify(error.message,true);}});
+async function resolveSyncConflict(keep){const scope=dialogScope($('#sync-conflict-modal'));try{await HealthLocal.resolveConflict(keep);scope.check();closeDialog($('#sync-conflict-modal'));}catch(error){if(!scope.signal?.aborted)notify(error.message,true);}}
+$('#keep-local-conflict').addEventListener('click',()=>resolveSyncConflict(true));
+$('#use-server-conflict').addEventListener('click',()=>resolveSyncConflict(false));
