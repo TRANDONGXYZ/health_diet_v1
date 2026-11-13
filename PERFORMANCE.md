@@ -1,3 +1,5 @@
+> The November 13 offline-first update supersedes acknowledgement-first UI timings below. Live delayed-response and disconnected measurements, payload sizes, migration and verification are in [OFFLINE.md](OFFLINE.md).
+
 # Weekly plan deletion timings
 
 ## Shared Add Week and recipe-save investigation

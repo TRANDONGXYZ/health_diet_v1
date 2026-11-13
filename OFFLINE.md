@@ -25,9 +25,10 @@ frontend build or Render settings are needed.
    nutrition lookups, initial migration and server sync still need a reachable
    backend. Local Ollama continues to work through the local Python server.
 
-The SQL upgrade has been executed against test PostgreSQL, not against your live
-Supabase project. Deployment and live Groq checks have not been performed for
-this refactor. Install the SQL before deploying this version.
+The operator applied the SQL upgrade and confirmed it succeeded. App commit
+`797085b` was deployed to https://health-diet.onrender.com and verified live on
+November 13, 2026. The live checks below used isolated anonymous workspaces and
+made no AI calls; Groq inference itself was not exercised by these checks.
 
 ## Mutation audit
 
@@ -128,6 +129,25 @@ held for **3 seconds**:
 | Add Week via Enter | 120 ms | 58 ms |
 | Save Recipe | 180 ms | 155 ms |
 | Add meal from picker | 98 ms | 152 ms |
+
+Live verification on the Singapore Render service, with sync responses also
+held for **3 seconds**:
+
+| Action to visible local completion | Live, delayed sync response | Live, fully offline |
+| --- | ---: | ---: |
+| Add Week via Enter | 123 ms | 114 ms |
+| Save Recipe | 162 ms | 99 ms |
+| Add meal from picker | 91 ms | 93 ms |
+
+`tests/live_offline.cjs --url https://health-diet.onrender.com` passed offline
+reload with pending changes and a 500px photo, ZIP export/restore while offline,
+reconnection and queue drain. A fresh browser context with the same anonymous
+cookie bootstrapped the saved recipes, weeks and private image from durable
+storage. A different anonymous tester saw no recipes/weeks and could not access
+the image. This used no AI quota. The live slot request was **430 bytes**, and its
+response was **804 bytes**, containing only that slot and its snapshot/version.
+Exact test records and measurements are in ignored
+`test-results/live-offline-beta.json`; no cookies or credentials are logged there.
 
 These are local fixture measurements, not live Render measurements. The test
 also reloads offline, reconnects, verifies persistence, deliberately loses a
