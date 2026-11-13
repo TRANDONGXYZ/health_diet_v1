@@ -45,7 +45,7 @@ def generation_context(data):
     if target>context['advance_limit']:
         raise ValueError('Advance planning is limited to eight weeks ahead of the current week.')
     if target!=context['week_start']:
-        if not store.get('plans',target):
+        if not data.get('client_only') and not store.get('plans',target):
             raise ValueError('Add this future week before generating its meals.')
         context=dict(context,week_start=target,week_end=(monday+timedelta(days=6)).isoformat(),
                      dates=[(monday+timedelta(days=i)).isoformat() for i in range(7)])
@@ -100,7 +100,7 @@ def build(data):
     context = generation_context(data)
     count = len(context["dates"])
     data = dict(data, week_start=context["week_start"])
-    recipes = store.all_items("recipes")
+    recipes = data['client_recipes'] if data.get('client_only') else store.all_items("recipes")
     if data.get("vegan_only"):
         recipes = [r for r in recipes if r.get("vegan") is True]
     if not recipes:

@@ -1,6 +1,7 @@
 """Run with python app.py. Core app uses only Python's standard library."""
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from mealapp import ai, nutrition, store, web, weekly, plan_jobs, dish_photos, backups, hosted
+from mealapp import ai, nutrition, store, web, weekly, plan_jobs, dish_photos, backups, hosted, offline_sync
 
 PUBLIC = store.ROOT / "public"
 TOKEN = secrets.token_urlsafe(32)
@@ -177,6 +178,7 @@ def post(route, data):
 
 
 class Handler(BaseHTTPRequestHandler):
+    local_token = TOKEN
     def send_response(self, code, message=None):
         self.response_code=code
         super().send_response(code,message)
@@ -229,6 +231,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "plans":plans,"calendar":calendar,"plan_job":active_job,"week_expansion":store.get('state','week_expansion',{}),
                                    "settings": {k: settings[k] for k in ("text_model", "vision_model", "vietnamese_model", "english_model", "language")}, "has_usda_key": settings["usda_api_key"] != "DEMO_KEY"}
             return self.reply(payload)
+        if route == '/api/sync/session':
+            return self.reply(offline_sync.profile(self))
+        if route == '/api/sync/bootstrap':
+            return self.reply(offline_sync.bootstrap(self))
+        if route == '/api/sync/pull':
+            try:
+                since=int(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('since',['0'])[0])
+                if since<0: raise ValueError()
+                return self.reply(offline_sync.pull(since))
+            except ValueError:
+                return self.reply({'error':'Invalid sync cursor.'},400)
         if route == "/api/status":
             return self.reply(ai.status())
         if route == "/api/ai-progress":
@@ -268,10 +281,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        filename = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css"}.get(route)
+        filename = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css", '/local-store.js':'local-store.js', '/local-backup.js':'local-backup.js', '/sw.js':'sw.js'}.get(route)
         if not filename:
             return self.reply({"error": "Not found"}, 404)
         body = (PUBLIC / filename).read_bytes()
+        if filename=='sw.js':
+            assets=('index.html','style.css','app.js','local-store.js','local-backup.js','sw.js')
+            version=hashlib.sha256(b''.join((PUBLIC/name).read_bytes() for name in assets)).hexdigest()[:20]
+            body=body.replace(b'__SHELL_VERSION__',version.encode())
         self.send_response(200)
         self.headers_common({"html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "css": "text/css; charset=utf-8"}[filename.rsplit(".", 1)[1]])
         self.send_header("Content-Length", str(len(body)))
@@ -289,6 +306,7 @@ class Handler(BaseHTTPRequestHandler):
             with store.request_scope():
                 length = int(self.headers.get("Content-Length", 0))
                 if urllib.parse.urlsplit(self.path).path == '/api/transcribe':
+                    if hosted.enabled(): store.initialize()
                     if not 0 < length <= 24*1024*1024:
                         return self.reply({'error':'Choose an audio/video file under 24 MB.'},413)
                     filename=self.headers.get('X-File-Name','')
@@ -308,13 +326,21 @@ class Handler(BaseHTTPRequestHandler):
                     if self.headers.get("Content-Type",'').split(';')[0] not in ('application/zip','application/octet-stream'):
                         return self.reply({"error":"Upload a ZIP backup."},415)
                     return self.reply(backups.import_zip(self.rfile.read(length)))
-                if not 0 < length <= 7_000_000:
+                if not 0 < length <= (48*1024*1024 if self.path=='/api/sync/push' else 7_000_000):
                     return self.reply({"error": "Request is empty or too large."}, 413)
                 if "application/json" not in self.headers.get("Content-Type", ""):
                     return self.reply({"error": "JSON required"}, 415)
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object.")
+                route=urllib.parse.urlsplit(self.path).path
+                if route == '/api/sync/push':
+                    if data.get('kind')=='restore': offline_sync.validate_restore(data)
+                    return self.reply(offline_sync.push(data))
+                if route == '/api/sync/photo':
+                    return self.reply(offline_sync.save_photo(data))
+                if route.startswith('/api/online/'):
+                    return self.reply(offline_sync.online(route.removeprefix('/api/online'),data))
                 result = post(urllib.parse.urlsplit(self.path).path, data)
                 self.reply(result)
         except (ValueError, TypeError, KeyError) as exc:

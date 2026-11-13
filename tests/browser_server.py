@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 import app
-from mealapp import ai, store, weekly, backups
+from mealapp import ai, store, weekly, backups, nutrition
 
 if not os.environ.get('MEAL_APP_DATA'):raise SystemExit('Run the browser check with an isolated temporary MEAL_APP_DATA folder.')
 ai.ROOT=store.DATA
@@ -31,6 +31,7 @@ def ask(task,schema,**kwargs):
 
 
 ai.ask=ask
+nutrition.resolve=lambda names:[{'name':name,'food':store.find_food(name)} if store.find_food(name) else {'name':name,'error':'Test reference unavailable; enter calories manually.'} for name in names]
 
 
 class Handler(app.Handler):

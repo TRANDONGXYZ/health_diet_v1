@@ -79,9 +79,9 @@ async function run() {
   await page.getByRole('button',{name:'Save recipe',exact:true}).click();
   await page.locator('#recipe-modal').waitFor({state:'hidden'});
   // The photo flow is tested with explicit service fixtures. Live model/network checks are separate.
-  await page.route('**/api/nutrition/identify',r => r.fulfill({json:{name:'broccoli raw',confidence:'medium',explanation:'Review the food name.'}}));
-  await page.route('**/api/nutrition/search',r => r.fulfill({json:{matches:[{name:'Broccoli, raw',kcal:34,source:'https://fdc.nal.usda.gov/food-details/170379/nutrients',retrieved_at:new Date().toISOString(),nutrients:[{name:'Vitamin C',amount:89.2,unit:'MG'}]}]}}));
-  await page.route('**/api/nutrition/guidance',r => r.fulfill({json:{items:[],sources:[],warnings:['No food-specific guidance found.']}}));
+  await page.route('**/api/online/nutrition/identify',r => r.fulfill({json:{name:'broccoli raw',confidence:'medium',explanation:'Review the food name.'}}));
+  await page.route('**/api/online/nutrition/search',r => r.fulfill({json:{matches:[{name:'Broccoli, raw',kcal:34,source:'https://fdc.nal.usda.gov/food-details/170379/nutrients',retrieved_at:new Date().toISOString(),nutrients:[{name:'Vitamin C',amount:89.2,unit:'MG'}]}]}}));
+  await page.route('**/api/online/nutrition/guidance',r => r.fulfill({json:{items:[],sources:[],warnings:['No food-specific guidance found.']}}));
   await page.getByRole('button',{name:'Photo nutrition'}).click();
   await page.getByRole('button',{name:'Use laptop camera'}).click();
   await page.waitForFunction(() => document.querySelector('#camera-feed').videoWidth > 0);
@@ -117,9 +117,9 @@ async function run() {
   // Generated speech text uses the same source editor and recipe importer as an article.
   const speechText = 'Tofu with tomatoes. Use 300 g tofu and 200 g tomatoes. Cook until hot.';
   const sourceUrl = 'https://www.facebook.com/share/v/1KFvMHBqtv/';
-  await page.route('**/api/extract',r => r.fulfill({json:{text:speechText,kind:'locally generated audio transcript',method:'audio',url:sourceUrl}}));
+  await page.route('**/api/online/extract',r => r.fulfill({json:{text:speechText,kind:'locally generated audio transcript',method:'audio',url:sourceUrl}}));
   await page.route('**/api/ai-progress',r => r.fulfill({json:{phase:'generating',elapsed_seconds:275}}));
-  await page.route('**/api/import',async r => {
+  await page.route('**/api/online/import',async r => {
     assert.equal(r.request().postDataJSON().text,speechText);
     await wait(3500);
     return r.fulfill({json:{recipe:{name:'Tofu with tomatoes',vegan:true,good_for_running:false,servings:2,estimated_minutes:null,source_url:sourceUrl,source_text:speechText,notes:'',content_language:'en',ingredients:[{name:'tofu',quantity:'300 g',grams:300,weight_estimated:false,source_quote:'300 g tofu'},{name:'tomatoes',quantity:'200 g',grams:200,weight_estimated:false,source_quote:'200 g tomatoes'}]},resolved:[]}});
@@ -139,7 +139,7 @@ async function run() {
   await page.waitForFunction(()=>document.querySelector('#source-language').textContent.includes('Vietnamese source'));
   await form.locator('[name=source_text]').fill(speechText);
   await page.waitForFunction(()=>document.querySelector('#source-language').textContent.includes('English source'));
-  await page.route('**/api/import',r => r.fulfill({status:400,json:{error:'The local model exceeded its 900-second processing limit. Your source text is retained.'}}));
+  await page.route('**/api/online/import',r => r.fulfill({status:400,json:{error:'The local model exceeded its 900-second processing limit. Your source text is retained.'}}));
   await page.getByRole('button',{name:'Extract recipe with AI',exact:true}).click();
   await page.locator('#recipe-modal .danger').filter({hasText:'processing limit'}).waitFor();
   assert.equal(await form.locator('[name=source_text]').inputValue(),speechText);

@@ -4,7 +4,7 @@ Repository: https://github.com/TRANDONGXYZ/health_diet_v1 · branch: **main**.
 
 ## Short deployment checklist
 
-1. Create a **Supabase Free** project. Enable **Authentication → Sign In / Providers → Anonymous Sign-Ins**. Run the complete [supabase/beta.sql](supabase/beta.sql) in its SQL Editor. This creates private per-user records, a private `health-diet-images` bucket, access policies, and durable AI usage counters. Keep the Data API enabled for `public`. Do not make the bucket public.
+1. Create a **Supabase Free** project. Enable **Authentication → Sign In / Providers → Anonymous Sign-Ins**. Run [supabase/beta.sql](supabase/beta.sql), then [supabase/offline.sql](supabase/offline.sql), in its SQL Editor. This creates private per-user records, a private `health-diet-images` bucket, access policies, and durable AI usage counters. Keep the Data API enabled for `public`. Do not make the bucket public.
 2. Push these changes to **main** in the existing GitHub repository. No personal data, `.env`, or `config.local.json` should be committed. The Docker build explicitly excludes them.
 3. In Render, choose **New → Web Service → Git Provider**, connect GitHub, and authorize access to `TRANDONGXYZ/health_diet_v1`. Select this repository from the connected account. **Do not use “Public Git Repository” URL deployment**: automatic deployment requires the connected Git provider.
 4. Use the exact settings below, enter the environment variables, and deploy. The included `render.yaml` is an alternative Blueprint configuration; importing it still requires linking GitHub and supplying the unset values.
@@ -51,19 +51,15 @@ No Supabase admin key, database password, GitHub token, or tester-provided API k
 
 ## Storage and anonymous testers
 
-Local mode remains `data/meals.sqlite3`, `data/photos/`, and optional `config.local.json`. Those are shared server files in the original app, not browser storage, so they cannot be the hosted source of truth.
+The browser now uses IndexedDB for local-first saves, including photos and an ordered sync queue. Manual actions work immediately without a server response, and the app shell is cached for offline reopens. See [OFFLINE.md](OFFLINE.md) for the upgrade, flow audit, protocol and measurements. Local development syncs to `data/meals.sqlite3`; hosted development syncs to Supabase.
 
 Hosted mode stores every tester's tables (recipes, foods, weekly plans, settings, caches and week collapse choices) in a separate Supabase `health_beta_data` row. Uploaded images use private Supabase Storage paths `USER_ID/SHA256.png`. Anonymous Supabase users receive unique user IDs without a registration screen. Row and storage policies require `auth.uid()` to match the owner. The backend uses each tester's own access token for all database/storage requests, so it does not bypass these policies.
 
 A signed **Secure, HttpOnly, SameSite=Lax** cookie retains the anonymous identity and refresh token across server restarts. Tokens/keys are not placed in HTML or JavaScript. Each tester receives a separate CSRF token; job status, progress, cancellation, media and backups are also scoped to that tester. Cookie refresh preserves the same identity. Clearing cookies, changing browsers/devices or changing the origin loses anonymous access; without registration there is no account recovery. Tell testers to keep cookies and export backups.
 
-SQLite and photos under temporary folders are working copies, reconstructed from Supabase. They are not the durable storage. Mutations and AI job results are acknowledged only after a durable revision-checked commit. Concurrent/stale deployment writes fail rather than overwrite newer data. If storage fails, the UI receives an error and the next request reloads the last durable version. A failed image/metadata commit may leave an unreferenced private image; there is no automatic image garbage collection in this first beta.
+The browser acknowledges a save after committing the local edit and its outbox entry in one IndexedDB transaction. Sync sends only affected records/slots with operation IDs and base versions. Supabase commits and durable receipts remove queued work only after acknowledgement; conflicts preserve unsynced local work for explicit review. Private server SQLite/photo files are caches for legacy routes and online features. Ordinary sync uses PostgreSQL delta RPCs, with no full-workspace HTTP transfer. Application files are cached together by a versioned service worker; personal API responses are not part of that cache.
 
-For performance, ordinary mutations reuse the tester's current working copy;
-explicit page/state reloads and backups fetch the durable version. Conflicts,
-failed writes and atomic week deletes invalidate the cache. Private photos are
-downloaded on demand, and backups still include the full image manifest. No
-additional SQL or environment variables are needed for this shared optimization.
+For an existing installation, run `supabase/offline.sql` before deployment. It adds owner-scoped record versions, tombstones, receipts and an upgrade trigger that also observes older app writes. No environment variables change. First use migrates the existing tester workspace and images into the browser; later refreshes request only changes since the saved cursor.
 
 ZIP export/import retains the existing versioned `backup-v1.json` plus `images/` format, including all weeks, deleted slots, collapse states and tester settings. Import confirmation and validation still apply; import replaces only that tester's workspace. Operator environment secrets are not exported. Local backups can be imported into the tester's own hosted session. Hosted model/provider settings are managed by the operator; imported local model names/keys do not change hosted inference. Hosted bounds: **12 MB structured records, 32 MB photos per tester; 48 MB ZIP upload/expanded validation**, with the existing 500 × 500 PNG and 4 MB individual photo validation. Local backup limits stay unchanged.
 
@@ -73,10 +69,12 @@ ZIP export/import retains the existing versioned `backup-v1.json` plus `images/`
 - Audio uses Groq's **`whisper-large-v3-turbo` transcription endpoint**, not its translation endpoint; language is auto-detected. ffmpeg converts audio to mono 16 kHz FLAC. Uploaded audio/video is limited to **24 MB and ten minutes**. Temporary media is deleted after use.
 - Public YouTube/Facebook imports still try captions, then retrieve audio if available. Hosting-provider IPs may be blocked by video sites. The same source editor accepts pasted text and an uploaded `.txt`, supported audio, or video file the tester is allowed to use. Unsupported sites, blocked/private links, missing tools and over-limit media provide this fallback. No browser cookies, sign-in credentials or download bypasses are used.
 - The SQL limiter reserves budget **before** each Groq request: **20 units/tester/day, 200 units across the entire beta/day**, plus **4 requests/tester/minute and 10 globally/minute**. A text/image call costs one unit; an audio transcription costs five. Counters persist across redeploys; daily windows reset at UTC midnight. A failed request still consumes its reservation. To change caps, edit the limiter in `supabase/beta.sql` and rerun it.
-- Actual Groq account/model quotas can be lower. HTTP 429 shows a quota message; other provider failures preserve source text and existing plans. No silent fallback to a different model or the operator's laptop is used. Manual editing, calorie arithmetic, Simple Rotation, Randomize and backup remain available when AI is unavailable, provided Supabase is reachable.
+- Actual Groq account/model quotas can be lower. HTTP 429 shows a quota message; other provider failures preserve source text and existing plans. No silent fallback to a different model or the operator's laptop is used. Manual editing, calorie arithmetic, Simple Rotation, Randomize and backup remain available when AI is unavailable, even if Supabase or Render is unavailable, once this browser has loaded its data and application files.
 - Inference is limited to one active provider call per server process. There is an additional new-session throttle (20/hour per connecting address) and a maximum of 100 in-memory session records per process. Supabase also limits anonymous sign-ins by source IP, so a small public beta behind one Render egress IP shares that signup allowance. These are basic budget controls, not full bot protection. Keep the beta small and monitor Groq/Supabase usage; registration and CAPTCHA flows are outside this version.
 
 ## Verification and handoff
+
+The current offline-first upgrade and new verification commands are documented in [OFFLINE.md](OFFLINE.md). Install `supabase/offline.sql` before deploying this version. The older latency measurements below describe the acknowledgement-first app before this refactor.
 
 For the weekly-delete latency fix, rerun the updated `supabase/beta.sql` to add
 `health_beta_delete_week`, then deploy the updated backend and frontend together.

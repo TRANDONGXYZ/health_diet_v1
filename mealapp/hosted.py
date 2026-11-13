@@ -73,12 +73,14 @@ def provider_error(path, status, payload):
         return HostedServiceError('Supabase requires a CAPTCHA for anonymous sign-in, but this beta does not send CAPTCHA tokens. The operator must reconcile the Supabase CAPTCHA setting with this beta setup.', 'captcha_required')
     if status==429:
         return HostedServiceError('Supabase temporarily limited requests or new anonymous sessions. Reuse your existing session and try later. Repeated reloads will not bypass the limit.', 'supabase_rate_limited',429)
+    if status==413:
+        return HostedServiceError('The hosted storage limit was reached (12 MB records, 32 MB photos). Your browser changes remain saved locally. Export a backup before reducing the data or contacting the beta operator.', 'supabase_storage_limit',413)
     if status==401 and stage=='anonymous_signup':
         return HostedServiceError('Supabase rejected the project API key. In Render, set SUPABASE_PUBLISHABLE_KEY to the publishable key from the same Supabase project as SUPABASE_URL, then redeploy.', 'supabase_key_rejected')
     if code in {'PGRST205','42P01'} or status==404 and stage=='records_read':
         return HostedServiceError('The Supabase health_beta_data table is missing from the Data API. Run the complete updated supabase/beta.sql in the project matching SUPABASE_URL and make sure the public schema is exposed.', 'supabase_table_missing')
     if code=='PGRST202' or status==404 and stage in {'records_save','ai_budget'}:
-        return HostedServiceError('A required Supabase beta function is missing from the Data API. Run the complete updated supabase/beta.sql in the project matching SUPABASE_URL, then retry.', 'supabase_function_missing')
+        return HostedServiceError('A required Supabase beta function is missing from the Data API. Run supabase/beta.sql, then supabase/offline.sql, in the project matching SUPABASE_URL, then retry.', 'supabase_function_missing')
     if status==404 and stage=='week_delete':
         return HostedServiceError('This weekly plan no longer exists. Reload the page.', 'week_not_found',400)
     if code=='42501' or status==403 and stage in {'records_read','records_save','week_delete','image_storage'}:
@@ -271,7 +273,7 @@ def invalidate(session):
     session.cache_valid=False
 
 
-def ensure_photo(name):
+def ensure_photo(name, *, allow_staged=False):
     """Fetch only the requested private image; never hydrate the workspace here."""
     from . import dish_photos
     session=current()
@@ -280,11 +282,11 @@ def ensure_photo(name):
     with SESSION_LOCK:lock=session.photo_locks.setdefault(name,threading.Lock())
     with lock:
         if path.is_file():return path
-        if session.document_hash is not None and name not in session.image_names:return None
+        if not allow_staged and session.document_hash is not None and name not in session.image_names:return None
         raw=remote('/storage/v1/object/authenticated/health-diet-images/'+session.uid+'/'+name,token=session.token,raw=True)
         if hashlib.sha256(raw).hexdigest()+'.png'!=name:raise ValueError('A saved dish image could not be verified. Please retry.')
         dish_photos.validate_png(raw)
-        if session.document_hash is not None and name not in session.image_names:return None
+        if not allow_staged and session.document_hash is not None and name not in session.image_names:return None
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(raw)
         session.image_sizes[name]=len(raw)
@@ -438,12 +440,12 @@ def serve(handler, callback):
         return handler.reply({'ok':True, 'mode':'hosted'})
     if not origin_allowed(handler):
         return handler.reply({'error':'Only same-origin access is allowed.'}, 403)
-    if handler.command == 'GET' and route in ('/', '/index.html', '/app.js', '/style.css'):
+    if handler.command == 'GET' and route in ('/', '/index.html', '/app.js', '/style.css','/local-store.js','/local-backup.js','/sw.js'):
         return callback()
     original = handler.wfile
     fast_delete=handler.command=='POST' and route=='/api/plan/delete'
     fast_read=handler.command=='GET' and (route in {'/api/ai-progress','/api/status','/api/plan/job'} or route.startswith('/media/'))
-    isolated=fast_delete or fast_read
+    isolated=fast_delete or fast_read or route.startswith(('/api/sync/','/api/online/')) or route=='/api/transcribe'
     stats={}
     timing_scope=TIMINGS.set(stats)
     started=time.monotonic()
@@ -451,7 +453,7 @@ def serve(handler, callback):
     session=None
     try:
         stage=time.monotonic()
-        session = identity_for(handler, create=handler.command == 'GET' and route == '/api/state')
+        session = identity_for(handler, create=handler.command == 'GET' and route in ('/api/state','/api/sync/session','/api/sync/bootstrap'))
         stats['identity']=(time.monotonic()-stage)*1000
         scope = CURRENT.set(session)
         try:

@@ -44,6 +44,8 @@ def save(data):
         path = folder / name
         if not path.exists():
             path.write_bytes(raw)
+    from . import offline_sync
+    if not data.get('_staged'):offline_sync.note_photo(name)
     return {"photo_url":"/media/" + name}
 
 

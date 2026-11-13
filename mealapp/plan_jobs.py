@@ -35,7 +35,7 @@ def get(job_id):
 
 
 def start(data):
-    weekly.history()
+    if not data.get('client_only'): weekly.history()
     context = weekly.generation_context(data)
     with LOCK:
         store.check_epoch()
@@ -55,6 +55,11 @@ def start(data):
             try:
                 with ai.cancellation_scope(token):
                     result = weekly.build(dict(data,method="AI",week_start=context["week_start"]))
+                    if data.get('client_only'):
+                        with LOCK:
+                            token.check()
+                            job.update(status='completed',plan=result)
+                        return
                     with hosted.write_scope(), LOCK:
                         token.check()
                         result = weekly.commit(result,data.get("timezone_offset"))

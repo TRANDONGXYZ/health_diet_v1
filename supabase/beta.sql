@@ -1,4 +1,5 @@
 -- Run once in the Supabase SQL Editor. No service-role key is needed by the app.
+-- Offline-first upgrade: also run supabase/offline.sql after this file.
 create table if not exists public.health_beta_data (
   user_id uuid primary key references auth.users(id) on delete cascade,
   revision bigint not null default 1,

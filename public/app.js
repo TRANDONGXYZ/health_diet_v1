@@ -12,9 +12,12 @@ let expansionSaves=Promise.resolve();
 const dayNames = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
 async function api(path, data) {
-  const response = await fetch(path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-App-Token':token},body:JSON.stringify(data)});
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+  const local=['/api/recipes','/api/recipes/delete','/api/recipes/running','/api/foods','/api/settings','/api/plan/add','/api/plan/delete','/api/plan/replace','/api/plan/expansion','/api/plan/generate','/api/plan/result'];
+  if(data!==undefined&&local.includes(path))return HealthLocal.mutate(path,data);
+  const route=data!==undefined?path.replace('/api/','/api/online/'):path;
+  const result=await HealthLocal.request(route,data);
+  // Lookups produce food references, but only the local transaction saves them.
+  if(path==='/api/resolve')for(const item of result.results||[])if(item.food&&!foodFor({name:item.name}))await HealthLocal.mutate('/api/foods',item.food);
   return result;
 }
 function notify(message, error = false) {
@@ -74,19 +77,21 @@ document.addEventListener('wheel',event=>{const active=$$('dialog[open]').at(-1)
 function tab(name) {
   ['weekly','dishes'].forEach(id => { $('#'+id).hidden = name !== id; $(`[data-tab=${id}]`).setAttribute('aria-selected',String(name === id)); });
 }
-let refreshVersion=0;
 async function refresh() {
-  const version=++refreshVersion;
-  const next=await api('/api/state?timezone_offset='+new Date().getTimezoneOffset());if(version!==refreshVersion)return;state=next;token=state.token;
+  renderState(HealthLocal.view(await HealthLocal.read()));
+}
+function renderState(next){
+  state=next;token=state.token;
   $('#dish-count').textContent = state.recipes.length; $('#food-count').textContent = `${state.foods.length} food references`;
   $('#food-options').innerHTML = state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join('');
   renderDishes(); renderWeek();
-  $('#storage-label').textContent=state.hosted?'Private beta workspace · Keep browser cookies or export a backup':'Stored on this laptop';
+  $('#storage-label').textContent='Saved on this device · Changes sync in the background · Export backups regularly';
   $('#settings-form').hidden=!!state.hosted;
   if(state.hosted&&!$('#hosted-settings-info'))$('#settings-form').insertAdjacentHTML('beforebegin','<p id="hosted-settings-info" class="footnote">AI is provided by the beta operator through Groq. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.</p>');
   if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';$('#photo-modal>.muted').textContent='Identify a food with hosted AI, confirm the name, then retrieve nutrition and guidance online. A photo cannot reveal exact ingredients or portion weight.';}
   if(state.hosted)$('#import-box .import-content>p.footnote:last-of-type').textContent='Vietnamese and English stay in the source language. Hosted video retrieval may be blocked. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.';
 }
+const displayPhoto=url=>HealthLocal.photoURL(url);
 async function checkStatus() {
   const node = $('#model-status');
   try {
@@ -136,7 +141,7 @@ function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};retu
 function mealCard(day,index,plan,past) {
   if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
   const r=mealRecipe(day,past),frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id),c=day.deleted?null:frozen?r?.calories:calculate(r||{}),isToday=day.date===state.calendar.today;
-  const image=day.deleted?'<span class="meal-placeholder" aria-hidden="true">Dish deleted</span>':r?.photo_url?`<img src="${esc(r.photo_url)}" alt="" width="500" height="500" loading="lazy">`:'<span class="meal-placeholder" aria-hidden="true">No photo</span>';
+  const image=day.deleted?'<span class="meal-placeholder" aria-hidden="true">Dish deleted</span>':r?.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="500" height="500" loading="lazy">`:'<span class="meal-placeholder" aria-hidden="true">No photo</span>';
   return `<article class="meal-card${isToday?' is-today':''}" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}"><button class="meal-open" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" ${isToday?'aria-current="date"':''} aria-label="${esc(r?.name||'Unavailable dish')} - ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="meal-image">${image}</span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span>${day.deleted?'':`<span class="meal-time">${esc(timeLabel(r||{}))}</span>`}<strong>${esc(r?.name||'Dish unavailable')}</strong>${day.deleted?'':`<span class="meal-calories">${fmt(c?.per_serving)} kcal / serving${c&&!c.complete?' (partial)':''}</span>`}${r?.good_for_running?'<span class="pill">Good for Running</span>':''}</span></button><div class="meal-actions"><button data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" class="secondary" aria-label="Edit meal for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}">Edit</button></div></article>`;
 }
 function offsetDate(start,offset){const d=new Date(start+'T12:00:00');d.setDate(d.getDate()+offset);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
@@ -145,7 +150,7 @@ function weekControls(plan) {
   const week=plan.week_start,pref=weekPreferences.get(week)||plan;
   return `<div class="toolbar panel weekly-controls future-controls" data-week="${esc(week)}"><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="vegan_only" ${pref.vegan_only?'checked':''}> Vegan dishes only</label><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="prioritize_running" ${pref.prioritize_running?'checked':''}> Prioritize Good for Running</label><div class="spacer"></div><button class="secondary plan-control" data-action="rotation" data-week="${esc(week)}">Simple Rotation</button><button class="secondary plan-control" data-action="randomize" data-week="${esc(week)}">Randomize</button><button class="plan-control" data-action="generate" data-week="${esc(week)}">Generate with AI</button><button class="secondary" data-action="cancel-plan" data-week="${esc(week)}" hidden>Cancel</button></div><p class="inline-message" data-plan-progress data-week="${esc(week)}" role="status" hidden></p>`;
 }
-function weekIsExpanded(week){return week===state.calendar.week_start?true:(weekExpansion.has(week)?weekExpansion.get(week):(state.week_expansion?.[week]??true));}
+function weekIsExpanded(week){return week===state.calendar.week_start?true:(state.week_expansion?.[week]??true);}
 function renderWeek() {
   if(!state.calendar)return;
   const plan=state.plan,calendar=state.calendar;
@@ -171,12 +176,11 @@ async function openAddWeek(){
   $('#add-week-select').innerHTML=weeks.map(week=>`<option value="${week}">${weekRange(week)}</option>`).join('');$('#add-week-message').textContent='';open('#add-week-modal','#create-week');
 }
 async function createWeek(){
-  if(weekMutationPending)return;weekMutationPending=true;++refreshVersion;
+  if(weekMutationPending)return;weekMutationPending=true;
   const button=$('#create-week');button.disabled=true;
   try{
-    const result=await api('/api/plan/add',{week_start:$('#add-week-select').value,timezone_offset:new Date().getTimezoneOffset()});
-    ++refreshVersion;state.plans=[...(state.plans||[]).filter(plan=>plan.week_start!==result.plan.week_start),result.plan];
-    renderWeek();closeDialog($('#add-week-modal'));notify('Week added with seven empty slots.');
+    await api('/api/plan/add',{week_start:$('#add-week-select').value,timezone_offset:new Date().getTimezoneOffset()});
+    await refresh();closeDialog($('#add-week-modal'));notify('Week added with seven empty slots.');
   }
   catch(error){$('#add-week-message').textContent=error.message;}
   finally{weekMutationPending=false;button.disabled=false;if($('#add-week-modal').open)button.focus({preventScroll:true});}
@@ -193,7 +197,7 @@ function runningPill(recipe) { return recipe.good_for_running ? '<span class="pi
 function blankRecipe() { return {name:'',vegan:null,good_for_running:false,servings:null,source_url:'',source_text:'',notes:'',measured_minutes:null,estimated_minutes:null,ingredients:[]}; }
 function editRecipe(recipe) {
   if(busy){notify("Wait for the current task to finish.");return;}
-  draft = structuredClone(recipe || blankRecipe());
+  draft = structuredClone(recipe || blankRecipe());if(recipe){draft.__version=state.versions?.['recipes/'+recipe.id]||0;draft.__original=structuredClone(recipe);delete draft.__original.__original;}
   $('#recipe-title').textContent = recipe ? 'Edit recipe' : 'Create recipe';
   $('#recipe-message').textContent = ''; fillRecipe(); $('#import-box').open = !recipe; open('#recipe-modal');
 }
@@ -245,7 +249,7 @@ async function resolveIngredient(name) {
   try {
     const result = await api('/api/resolve',{names:[name]});
     for (const item of result.results) {
-      if (item.food) { state.foods = state.foods.filter(f => f.id !== item.food.id).concat(item.food); $('#recipe-message').textContent = item.food.note; }
+      if (item.food) { $('#recipe-message').textContent = item.food.note; }
       else $('#recipe-message').textContent = item.error;
     }
     updateCalories();
@@ -253,7 +257,7 @@ async function resolveIngredient(name) {
   finally { resolving.delete(name); }
 }
 function detailsMarkup(r, frozen=false) {
-  return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2>${frozen?'':`<button data-action="edit" data-id="${esc(r.id)}" class="secondary">Edit</button>`}</div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(r.photo_url)}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
+  return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2>${frozen?'':`<button data-action="edit" data-id="${esc(r.id)}" class="secondary">Edit</button>`}</div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(displayPhoto(r.photo_url))}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
 }
 function showDetails(id) { const r = state.recipes.find(r => r.id === id); if (!r) return; $('#dish-detail').innerHTML = detailsMarkup(r); open('#detail-modal'); }
 let planJobId=null,planJobWeek=null,pendingPlanWeek=null,planPollTimer=null, planPollPending=false, requestedPlanCancel=false;
@@ -266,12 +270,15 @@ function setPlanBusy(active) {
   $$('[data-action=cancel-plan],[data-plan-progress]').forEach(node=>{node.hidden=!(active&&node.dataset.week===jobWeek());});
 }
 async function finishPlanJob(job) {
+  if(job.id&&planJobId&&job.id!==planJobId)return;
   if(job.status==='running'||job.status==='cancelling')return;
-  clearInterval(planPollTimer);planPollTimer=null;planJobId=null;planJobWeek=null;pendingPlanWeek=null;setPlanBusy(false);cancelDisabled(false);
-  await refresh();
-  if(job.status==='completed')notify('Your weekly plan is saved.');
-  else if(job.status==='cancelled')notify('AI generation cancelled. Your saved plan was kept.');
-  else notify(job.error||'Generation failed. Your saved plan was kept.',true);
+  const finishing=planJobId;clearInterval(planPollTimer);planPollTimer=null;
+  const forget=()=>HealthLocal.write((data,tx)=>{if(!data.meta.planJob||data.meta.planJob.id===(job.id||finishing))tx.objectStore('meta').put({id:'planJob',value:null});});
+  try{
+    if(job.status==='completed'){const savedJob=(await HealthLocal.read()).meta.planJob;await api('/api/plan/result',{...job.plan,method:'AI',job_id:job.id,originals:job.originals||(savedJob?.id===job.id?savedJob.originals:null)});await refresh();notify('Your weekly plan is saved.');}
+    else{await forget();notify(job.status==='cancelled'?'AI generation cancelled. Your saved plan was kept.':job.error||'Generation failed. Your saved plan was kept.',job.status!=='cancelled');}
+  }catch(error){await forget();notify(error.message,true);}
+  finally{if(planJobId===finishing){planJobId=null;planJobWeek=null;pendingPlanWeek=null;setPlanBusy(false);cancelDisabled(false);}}
 }
 async function pollPlanJob() {
   if(!planJobId||planPollPending)return;planPollPending=true;
@@ -283,10 +290,11 @@ async function pollPlanJob() {
       planProgress(`${progress.phase==='loading'?'Loading the model or reading recipes':'Generating your meal plan'} - ${Math.floor(progress.elapsed_seconds/60)}m ${progress.elapsed_seconds%60}s. Your saved plan stays visible.`);
     }
     await finishPlanJob(job);
-  } catch(error){planProgress('Connection interrupted. Use Cancel to stop the task, or reload to reconnect.');}
+  } catch(error){if(error.status===404){await finishPlanJob({status:'failed',error:'The AI task is no longer available. Your saved plan was kept.'});return;}planProgress('Connection interrupted. Use Cancel to stop the task, or reload to reconnect.');}
   finally {planPollPending=false;}
 }
-function followPlanJob(job) {
+async function followPlanJob(job) {
+  await HealthLocal.write((data,tx)=>tx.objectStore('meta').put({id:'planJob',value:{id:job.id,week_start:job.week_start,status:job.status,originals:job.originals||null}}));
   planJobId=job.id;planJobWeek=job.week_start;pendingPlanWeek=null;setPlanBusy(true);cancelDisabled(job.status==='cancelling');planProgress(job.status==='cancelling'?'Stopping AI generation...':'Starting local AI generation...');
   clearInterval(planPollTimer);planPollTimer=setInterval(pollPlanJob,800);pollPlanJob();
 }
@@ -296,9 +304,13 @@ async function generate(method='AI',week=state.calendar.week_start) {
   const data={method,week_start:week,timezone_offset:new Date().getTimezoneOffset(),vegan_only:$('input[data-pref=vegan_only]',panel).checked,prioritize_running:$('input[data-pref=prioritize_running]',panel).checked};
   if(method==='AI'){
     requestedPlanCancel=false;pendingPlanWeek=week;setPlanBusy(true);
-    try {const job=await api('/api/plan/start',data);if(job.status==='completed'){await refresh();setPlanBusy(false);}else {followPlanJob(job);if(requestedPlanCancel)await cancelPlan();}}
+    const contents=HealthLocal.entities(await HealthLocal.read()),originals={};
+    originals['plans/'+week]=contents['plans/'+week]||null;
+    for(let i=0;i<7;i++){const date=offsetDate(week,i);if(date>=state.calendar.today)originals['meals/'+week+'/'+date]=contents['meals/'+week+'/'+date]||null;}
+    const candidates=state.recipes.filter(r=>!data.vegan_only||r.vegan===true).map(r=>({r,key:Math.random()})).sort((a,b)=>a.key-b.key).map(item=>item.r).sort((a,b)=>data.prioritize_running?Number(!!b.good_for_running)-Number(!!a.good_for_running):0).slice(0,12).map(r=>({id:r.id,name:r.name,vegan:r.vegan,good_for_running:r.good_for_running,minutes:r.measured_minutes||r.estimated_minutes,ingredients:r.ingredients.slice(0,12).map(i=>i.name)}));
+    try {const job={...await api('/api/plan/start',{...data,candidates}),originals};if(job.status==='completed'){await finishPlanJob(job);}else {await followPlanJob(job);if(requestedPlanCancel)await cancelPlan();}}
     catch(error){pendingPlanWeek=null;setPlanBusy(false);notify(error.message,true);}
-  }else await work('Saving your remaining week',async()=>{await api('/api/plan/generate',data);await refresh();notify('Your weekly plan is saved.');});
+  }else await work('Saving your remaining week',async()=>{await api('/api/plan/generate',data);await refresh();notify('Your weekly plan is saved.');},{pollAI:false});
 }
 async function cancelPlan() {
   if(!planJobId){requestedPlanCancel=true;cancelDisabled(true);planProgress('Stopping AI generation...');return;}cancelDisabled(true);planProgress('Stopping AI generation...');
@@ -308,7 +320,7 @@ async function cancelPlan() {
 let replacement=null,weekMutationPending=false;
 function openReplacement(week,index) {
   const day=(state.plans||[]).find(p=>p.week_start===week)?.days[index];if(!day)return;
-  replacement={week,date:day.date,recipeId:null,empty:!day.recipe_id};$('#replace-search').value='';$('#replace-title').textContent=replacement.empty?'Add dish':'Replace meal';$('#replace-confirm').textContent=replacement.empty?'Add':'Replace';
+  replacement={week,date:day.date,base:state.versions?.['meals/'+week+'/'+day.date]||0,original:structuredClone(day),recipeId:null,empty:!day.recipe_id};$('#replace-search').value='';$('#replace-title').textContent=replacement.empty?'Add dish':'Replace meal';$('#replace-confirm').textContent=replacement.empty?'Add':'Replace';
   $('#replace-date').textContent=dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long',year:'numeric'});
   $('#replace-message').textContent=replacement.empty?'Select a saved dish, review its details, then click Add.':'Select any saved dish, review its details, then click Replace.';
   $('#replacement-details').hidden=true;$('#replacement-details').innerHTML='';$('#replace-modal').classList.remove('expanded');$('#replace-confirm').disabled=true;
@@ -316,7 +328,7 @@ function openReplacement(week,index) {
 }
 function renderReplacementList() {
   const query=normalize($('#replace-search').value),dishes=state.recipes.filter(r=>normalize(r.name).includes(query));
-  $('#replace-list').innerHTML=dishes.map(r=>`<button class="replacement-choice${replacement?.recipeId===r.id?' selected':''}" data-action="choose-replacement" data-id="${esc(r.id)}" aria-pressed="${replacement?.recipeId===r.id}">${r.photo_url?`<img src="${esc(r.photo_url)}" alt="" width="64" height="64" loading="lazy">`:''}<span><strong>${esc(r.name)}</strong><small>${esc(timeLabel(r))} - ${fmt(calculate(r).per_serving)} kcal / serving</small></span></button>`).join('')||`<p class="muted">${state.recipes.length?'No matching dishes.':'No saved dishes yet. Create a recipe in Dish List first.'}</p>`;
+  $('#replace-list').innerHTML=dishes.map(r=>`<button class="replacement-choice${replacement?.recipeId===r.id?' selected':''}" data-action="choose-replacement" data-id="${esc(r.id)}" aria-pressed="${replacement?.recipeId===r.id}">${r.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="64" height="64" loading="lazy">`:''}<span><strong>${esc(r.name)}</strong><small>${esc(timeLabel(r))} - ${fmt(calculate(r).per_serving)} kcal / serving</small></span></button>`).join('')||`<p class="muted">${state.recipes.length?'No matching dishes.':'No saved dishes yet. Create a recipe in Dish List first.'}</p>`;
 }
 function selectReplacement(id) {
   if(weekMutationPending)return;const recipe=state.recipes.find(r=>r.id===id);if(!replacement||!recipe)return;
@@ -329,23 +341,20 @@ async function replaceMeal() {
   if(!replacement?.recipeId||weekMutationPending)return;weekMutationPending=true;$('#replace-confirm').disabled=true;
   const target={...replacement};$('#replace-message').textContent='Saving replacement...';
   try {
-    await api('/api/plan/replace',{week_start:target.week,date:target.date,recipe_id:target.recipeId});
+    await api('/api/plan/replace',{week_start:target.week,date:target.date,recipe_id:target.recipeId,base:target.base,original:target.original});
     await refresh();closeDialog($('#replace-modal'));replacement=null;notify(target.empty?'Dish added.':'Meal replaced.');
   }catch(error){$('#replace-message').textContent=error.message;$('#replace-confirm').disabled=false;}
   finally {weekMutationPending=false;}
 }
 async function deleteWeek(button) {
   if(weekMutationPending||busy)return;
-  const week=button.dataset.week;weekMutationPending=true;
+  const week=button.dataset.week,base=state.versions?.['plans/'+button.dataset.week]||0;weekMutationPending=true;
   if(!confirm(`Delete the meal plan for ${weekRange(week)}? Your saved dishes will be kept.`)){weekMutationPending=false;return;}
-  button.disabled=true;++refreshVersion;
+  button.disabled=true;
   try {
-    await api('/api/plan/delete',{week_start:week});
-    // The server has durably committed before acknowledging this response.
-    // Remove only that week; a full state reload adds an avoidable storage trip.
-    ++refreshVersion;state.plans=(state.plans||[]).filter(plan=>plan.week_start!==week);
-    if(state.plan?.week_start===week)state.plan=null;
-    renderWeek();notify('Weekly plan deleted. Your saved recipes were kept.');
+    await api('/api/plan/delete',{week_start:week,base,original:(({days,...metadata})=>metadata)(state.plans.find(p=>p.week_start===week))});
+    // IndexedDB committed both the deletion and its ordered sync entry.
+    await refresh();notify('Weekly plan deleted. Your saved recipes were kept.');
   }
   catch(error){button.disabled=false;notify(error.message,true);}
   finally {weekMutationPending=false;}
@@ -363,13 +372,12 @@ async function uploadDishPhoto(file) {
       const side=Math.min(image.width,image.height),canvas=document.createElement('canvas');canvas.width=500;canvas.height=500;
       canvas.getContext('2d').drawImage(image,(image.width-side)/2,(image.height-side)/2,side,side,0,0,500,500);image.close();
       const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
-      const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
-      const result=await api('/api/dish-photo',{filename:file.name,image:data});draft=readRecipe();draft.photo_url=result.photo_url;showDishPhoto();$('#dish-photo-message').textContent='Photo ready: 500 by 500 pixels.';
-    });
+      const result=await HealthLocal.photo(blob);draft=readRecipe();draft.photo_url=result.photo_url;showDishPhoto();$('#dish-photo-message').textContent='Photo ready: 500 by 500 pixels.';
+    },{pollAI:false});
   }catch(error){$('#dish-photo-message').textContent=error.message;notify(error.message,true);}
   finally {$('#dish-photo-upload').value='';}
 }
-function showDishPhoto() {const url=draft?.photo_url||'';$('#dish-photo-preview').hidden=!url;if(url)$('#dish-photo-preview').src=url;else $('#dish-photo-preview').removeAttribute('src');$('#remove-dish-photo').hidden=!url;}
+function showDishPhoto() {const url=draft?.photo_url||'';$('#dish-photo-preview').hidden=!url;if(url)$('#dish-photo-preview').src=displayPhoto(url);else $('#dish-photo-preview').removeAttribute('src');$('#remove-dish-photo').hidden=!url;}
 function renderFoods() {
   const query = normalize($('#food-search').value);
   const foods = state.foods.filter(f => normalize(f.name+' '+(f.vi_name || '')+' '+(f.aliases || []).join(' ')).includes(query)).sort((a,b) => a.name.localeCompare(b.name));
@@ -377,7 +385,7 @@ function renderFoods() {
 }
 function editFood(id) {
   const food = state.foods.find(f => f.id === id); if (!food) return;
-  const f = $('#food-form'); ['id','name','kcal','note'].forEach(k => f.elements[k].value = food[k] ?? ''); f.elements.aliases.value = (food.aliases || []).join(', '); f.elements.name.focus();
+  const f = $('#food-form'); f.dataset.version=state.versions?.['foods/'+id]||0; f.dataset.original=JSON.stringify(food); ['id','name','kcal','note'].forEach(k => f.elements[k].value = food[k] ?? ''); f.elements.aliases.value = (food.aliases || []).join(', '); f.elements.name.focus();
 }
 async function loadPhoto(file) {
   if (!file) return;
@@ -433,6 +441,11 @@ async function chooseNutrition(index) {
 }
 
 document.addEventListener('click', async event => {
+  const summary=event.target.closest('.week-summary');
+  if(summary&&!event.target.closest('button')){
+    event.preventDefault();const week=summary.closest('details').dataset.week;
+    await saveWeekExpansion(week,!(weekExpansion.has(week)?weekExpansion.get(week):weekIsExpanded(week)));return;
+  }
   const button = event.target.closest('button,[data-action=meal-details]'); if (!button) return;
   if (button.hasAttribute('data-close')) {if((busy&&button.closest('#recipe-modal'))||(weekMutationPending&&button.closest('#replace-modal'))){notify('Wait for the current task to finish.');return;} closeDialog(button.closest('dialog')); return; }
   if (button.dataset.tab) { tab(button.dataset.tab); return; }
@@ -445,7 +458,7 @@ document.addEventListener('click', async event => {
   if (action === 'delete') {
     const recipe = state.recipes.find(r => r.id === id);
     if (!recipe)return;
-    if (confirm(`Delete “${recipe.name}”? This will mark the dish as “Dish deleted” everywhere it appears in Weekly Meals, including past, current, and upcoming weeks.`)) await work('Deleting recipe',async () => { await api('/api/recipes/delete',{id}); await refresh(); notify('Recipe deleted.'); });
+    if (confirm(`Delete “${recipe.name}”? This will mark the dish as “Dish deleted” everywhere it appears in Weekly Meals, including past, current, and upcoming weeks.`)) await work('Deleting recipe',async () => { await api('/api/recipes/delete',{id,base:state.versions?.['recipes/'+id]||0,original:recipe}); await refresh(); notify('Recipe deleted.'); },{pollAI:false});
   }
   if (action === 'retrieve') await work(state.hosted?'Retrieving source; if the host is blocked, paste a transcript or upload a file you are allowed to use':'Retrieving source; videos without captions are downloaded as audio and transcribed locally. This can take several minutes',async () => {
     const f = $('#recipe-form'); const source = await api('/api/extract',{url:f.elements.source_url.value,kind:$('#source-kind').value});
@@ -453,7 +466,7 @@ document.addEventListener('click', async event => {
   });
   if (action === 'import') await work('Extracting the dish and ingredient list',async () => {
     const f = $('#recipe-form'), result = await api('/api/import',{text:f.elements.source_text.value,url:f.elements.source_url.value});
-    const previous=readRecipe(); draft = {...result.recipe,id:draft.id,good_for_running:previous.good_for_running,photo_url:previous.photo_url,measured_minutes:previous.measured_minutes}; await refresh(); fillRecipe();
+    const previous=readRecipe(); draft = {...result.recipe,id:draft.id,__version:previous.__version,__original:previous.__original,good_for_running:previous.good_for_running,photo_url:previous.photo_url,measured_minutes:previous.measured_minutes}; await refresh(); fillRecipe();
     const warnings = result.resolved.filter(r => r.error).map(r => `${r.name}: ${r.error}`);
     $('#recipe-message').textContent = 'Ingredients extracted in the source language. Review quantities, servings, and estimated weights before saving. '+(result.recipe.extraction_warnings||[]).join(' ') + (warnings.length ? '\n'+warnings.join('\n') : '');
   });
@@ -487,20 +500,16 @@ document.addEventListener('click', async event => {
   if (action === 'identify') await work(state.hosted?'Identifying the food with hosted AI':'Identifying the food locally',async () => { const result = await api('/api/nutrition/identify',{image:photo}); $('#nutrition-query').value = result.name; $('#identification').textContent = `${result.name} · ${result.confidence} confidence. ${result.explanation}\nConfirm or correct the name below before looking it up.`; });
   if (action === 'nutrition-search') await nutritionSearch();
   if (action === 'choose-nutrition') await chooseNutrition(Number(button.dataset.index));
-  if (action === 'settings') { const f = $('#settings-form'); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = ''; open('#settings-modal'); await checkStatus(); }
+  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = ''; open('#settings-modal'); await checkStatus(); }
   if (action === 'export') await exportBackup();
 });
 $('#recipe-form').addEventListener('submit',async event => {
   event.preventDefault();
-  await work('Saving recipe and checking calorie values',async () => {
-    ++refreshVersion;const result=await api('/api/recipes',readRecipe());++refreshVersion;
-    const recipe={...result.recipe,calories:result.calories},index=state.recipes.findIndex(item=>item.id===recipe.id);
-    if(index<0)state.recipes.push(recipe);else state.recipes[index]=recipe;
-    if(result.foods)state.foods=result.foods;
-    $('#dish-count').textContent=state.recipes.length;$('#food-count').textContent=`${state.foods.length} food references`;
-    $('#food-options').innerHTML=state.foods.map(food=>`<option value="${esc(food.name)}">${esc(food.name)} · ${esc(food.aliases?.join(', '))}</option>`).join('');
-    renderDishes();renderWeek();closeDialog($('#recipe-modal'));tab('dishes');
+  await work('Saving recipe on this device',async () => {
+    const result=await api('/api/recipes',readRecipe());
+    await refresh();closeDialog($('#recipe-modal'));tab('dishes');
     notify(result.warnings.length?'Recipe saved. Some estimates are unavailable: '+result.warnings.join(' '):'Recipe saved.');
+    setTimeout(resolveSavedFoods,0);
   },{pollAI:false});
 });
 $('#recipe-form').addEventListener('input',event=>{updateCalories();if(event.target.name==='source_text'){clearTimeout(languageTimer);languageTimer=setTimeout(showSourceLanguage,250);}});
@@ -509,16 +518,16 @@ document.addEventListener('change',async event=>{
   const input=event.target;
   if(!input.matches('[data-running-id]')) return;
   const value=input.checked;
-  try { await api('/api/recipes/running',{id:input.dataset.runningId,good_for_running:value});await refresh(); }
+  try { await api('/api/recipes/running',{id:input.dataset.runningId,good_for_running:value,base:state.versions?.['recipes/'+input.dataset.runningId]||0,original:state.recipes.find(r=>r.id===input.dataset.runningId)});await refresh(); }
   catch(error){input.checked=!value;notify(error.message,true);}
 });
 $('#food-form').addEventListener('submit',async event => {
   event.preventDefault(); const f = event.target;
-  await work('Saving your food value',async () => { await api('/api/foods',{id:f.elements.id.value,name:f.elements.name.value,kcal:Number(f.elements.kcal.value),aliases:f.elements.aliases.value.split(',').map(s => s.trim()).filter(Boolean),note:f.elements.note.value}); await refresh(); renderFoods(); if ($('#recipe-modal').open) updateCalories(); f.reset(); notify('Food value saved. Recipe calories have been updated.'); });
+  await work('Saving your food value',async () => { await api('/api/foods',{original:f.elements.id.value?JSON.parse(f.dataset.original||'null'):undefined,base:f.elements.id.value?Number(f.dataset.version||0):undefined,id:f.elements.id.value,name:f.elements.name.value,kcal:Number(f.elements.kcal.value),aliases:f.elements.aliases.value.split(',').map(s => s.trim()).filter(Boolean),note:f.elements.note.value}); await refresh(); renderFoods(); if ($('#recipe-modal').open) updateCalories(); f.reset(); notify('Food value saved. Recipe calories have been updated.'); },{pollAI:false});
 });
 $('#settings-form').addEventListener('submit',async event => {
-  event.preventDefault(); const data = Object.fromEntries(new FormData(event.target));
-  await work('Saving local settings',async () => { await api('/api/settings',data); await refresh(); await checkStatus(); closeDialog($('#settings-modal')); notify('Settings saved.'); });
+  event.preventDefault(); const data = {...Object.fromEntries(new FormData(event.target)),base:Number(event.target.dataset.version||0),original:JSON.parse(event.target.dataset.original||'null')};
+  await work('Saving local settings',async () => { await api('/api/settings',data); await refresh(); closeDialog($('#settings-modal')); notify('Settings saved.'); },{pollAI:false});
 });
 $('#dish-search').addEventListener('input',renderDishes); $('#vegan-filter').addEventListener('change',renderDishes); $('#running-filter').addEventListener('change',renderDishes); $('#food-search').addEventListener('input',renderFoods);
 $('#dish-photo-upload').addEventListener('change',e=>uploadDishPhoto(e.target.files[0]));
@@ -535,6 +544,7 @@ $('#transcript-upload').addEventListener('change',async event=>{
       let text;
       if(/\.txt$/i.test(file.name))text=await file.text();
       else{
+        if(!navigator.onLine)throw new Error('Audio transcription needs a connection. Paste or upload a text transcript while offline.');
         const response=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-App-Token':token,'X-File-Name':file.name.replace(/[^a-zA-Z0-9._-]/g,'_')},body:file});
         const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not transcribe this file. Paste a transcript instead.');text=data.text;
       }
@@ -545,11 +555,11 @@ $('#transcript-upload').addEventListener('change',async event=>{
 });
 (async () => {
   try {
-    await refresh();
+    await HealthLocal.init(renderState,showSyncStatus);
     $('#plan-vegan').checked=!!state.plan?.vegan_only;$('#plan-running').checked=!!state.plan?.prioritize_running;
-    if(state.plan_job)followPlanJob(state.plan_job);
-    await checkStatus();
-    setInterval(async()=>{if(!busy&&!planJobId&&!weekMutationPending){try{await refresh();}catch{}}},60000);
+    if(state.plan_job)await followPlanJob(state.plan_job);
+    await checkStatus();setTimeout(resolveSavedFoods,0);
+    setInterval(()=>refresh().catch(()=>{}),60000);
   } catch (error) { notify('Could not load the app: '+error.message,true); }
 })();
 
@@ -562,13 +572,17 @@ document.addEventListener('change',event=>{const input=event.target;if(!input.ma
 function rememberWeekExpansion(event){
   const node=event.target,week=node.dataset.week;
   if(!node.isConnected||!node.matches('details[data-week]')||week===state.calendar?.week_start||node.open===weekIsExpanded(week))return;
-  const expanded=node.open;weekExpansion.set(week,expanded);
-  expansionSaves=expansionSaves.then(()=>api('/api/plan/expansion',{week_start:week,expanded})).then(()=>{state.week_expansion={...(state.week_expansion||{}),[week]:expanded};}).catch(error=>notify(error.message,true));
+  saveWeekExpansion(week,node.open);
+}
+function saveWeekExpansion(week,expanded){
+  const base=state.versions?.['expansion/'+week]||0;weekExpansion.set(week,expanded);
+  expansionSaves=expansionSaves.then(()=>api('/api/plan/expansion',{week_start:week,expanded,base,original:state.week_expansion?.[week]??null})).catch(error=>{notify(error.message,true);renderWeek();}).finally(()=>{if(weekExpansion.get(week)===expanded)weekExpansion.delete(week);});
+  return expansionSaves;
 }
 $('#plan-history').addEventListener('toggle',rememberWeekExpansion,true);
 $('#future-weeks').addEventListener('toggle',rememberWeekExpansion,true);
 function clearBackupFeedback(){$$('#settings-modal [data-persist=true]').forEach(node=>node.remove());$('#backup-message').textContent='';}
-async function exportBackup(){clearBackupFeedback();await work('Exporting full ZIP backup',async()=>{await expansionSaves;const response=await fetch('/api/backup/export');if(!response.ok){const data=await response.json();throw new Error(data.error||'Backup export failed.');}const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');link.href=url;link.download='meal-notebook-backup.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#backup-message').textContent='Backup exported.';});}
+async function exportBackup(){clearBackupFeedback();await work('Exporting full ZIP backup',async()=>{await expansionSaves;const url=URL.createObjectURL(await HealthBackup.exportZip()),link=document.createElement('a');link.href=url;link.download='meal-notebook-backup.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#backup-message').textContent='Backup exported, including pending local changes.';},{pollAI:false});}
 $('#backup-file').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;clearBackupFeedback();
   try{
@@ -577,11 +591,34 @@ $('#backup-file').addEventListener('change',async event=>{
     if(!confirm('Importing this backup will replace all current data with the contents of the backup file. Do you want to continue?'))return;
     await expansionSaves;
     await work('Validating and restoring backup',async()=>{
-      const response=await fetch('/api/backup/import',{method:'POST',headers:{'Content-Type':'application/zip','X-App-Token':token},body:file});const data=await response.json();
-      if(!response.ok){$('#backup-message').textContent=data.error;throw new Error(data.error||'Backup import failed. Existing data was kept.');}
+      await HealthBackup.importZip(file);
       weekPreferences.clear();weekExpansion.clear();$('#plan-vegan').dataset.week='';$('#plan-running').dataset.week='';
-      await refresh();await checkStatus();closeDialog($('#settings-modal'));notify('Backup restored: recipes, weeks, images and settings.');
-    });
+      await refresh();closeDialog($('#settings-modal'));notify('Backup restored: recipes, weeks, images and settings.');
+    },{pollAI:false});
   }catch(error){$('#backup-message').textContent=error.message;notify(error.message,true);}
   finally{event.target.value='';}
 });
+
+let syncConflict=null;
+const foodLookupAttempts=new Set();let resolvingSavedFoods=false;
+async function resolveSavedFoods(){
+  if(!navigator.onLine||resolvingSavedFoods)return;
+  resolvingSavedFoods=true;
+  try{
+    const names=[...new Set(state.recipes.flatMap(r=>r.ingredients).filter(i=>!foodFor(i)).map(i=>i.name))].filter(name=>!foodLookupAttempts.has(name)).slice(0,5);
+    for(const name of names){if(!navigator.onLine)break;foodLookupAttempts.add(name);try{await api('/api/resolve',{names:[name]});}catch{/* The recipe is already saved; unknown calories stay explicitly incomplete. */}}
+  }finally{resolvingSavedFoods=false;}
+}
+window.addEventListener('online',()=>{foodLookupAttempts.clear();setTimeout(resolveSavedFoods,0);});
+function showSyncStatus(status){
+  syncConflict=status.conflict;
+  $('#connection-status').textContent=`${status.online?'Online':'Offline'} · ${status.syncing?'Syncing':status.pending?`${status.error?'Sync failed ? ':''}${status.pending} change${status.pending===1?'':'s'} pending`:status.error?'Sync unavailable':'All changes synced'}`;
+  $('#connection-status').title=status.error||'Changes are saved on this device before syncing.';
+  $('#sync-conflict').hidden=!status.conflict;
+}
+$('#sync-conflict').addEventListener('click',()=>{
+  $('#sync-conflict-message').textContent=(syncConflict?.conflict?.message||'This record changed elsewhere.')+' Your unsynced edit is still saved on this device. Keep local retries your edit against the current version; a deleted recipe is saved as a new dish. Use server explicitly discards this pending operation.';
+  open('#sync-conflict-modal');
+});
+$('#keep-local-conflict').addEventListener('click',async()=>{try{await HealthLocal.resolveConflict(true);closeDialog($('#sync-conflict-modal'));}catch(error){notify(error.message,true);}});
+$('#use-server-conflict').addEventListener('click',async()=>{try{await HealthLocal.resolveConflict(false);closeDialog($('#sync-conflict-modal'));}catch(error){notify(error.message,true);}});

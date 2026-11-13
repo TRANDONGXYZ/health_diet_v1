@@ -1,8 +1,10 @@
 # Meal Notebook — local Windows app
 
-A small recipe library and weekly planner. The browser UI uses plain JavaScript; the server uses Python and SQLite. No Node.js, frontend build, subscription, or cloud AI key is needed.
+A small recipe library and weekly planner. The browser UI uses plain JavaScript and IndexedDB for offline-first saves; the Python server syncs data to SQLite locally or Supabase when hosted. No Node.js, frontend build, subscription, or cloud AI key is needed.
 
 For the **Render Free public beta**, see [DEPLOYMENT.md](DEPLOYMENT.md): GitHub `main` deployment, server-side Groq, Supabase anonymous tester storage, backup migration, environment variables and verification. Running `start.cmd` still uses the local app and Ollama.
+
+Manual changes now save in the browser first and sync in the background. Once loaded online, the app reopens offline on the same device. See [OFFLINE.md](OFFLINE.md) for the migration, backup behavior and verified timings. **Existing hosted deployments must run `supabase/offline.sql` before deploying this update.**
 
 ## Start on Windows 11
 
@@ -17,7 +19,7 @@ For the **Render Free public beta**, see [DEPLOYMENT.md](DEPLOYMENT.md): GitHub 
    ollama pull qwen3.5:0.8b
    ```
 
-5. Double-click **`start.cmd`**. It opens **http://127.0.0.1:8765** in your browser. Keep the server window open while using the app. Press **Ctrl+C** in that window to stop it.
+5. Double-click **`start.cmd`**. It opens **http://127.0.0.1:8765** in your browser. Keep the server window open for AI and background sync; previously loaded manual tools work even when the server is stopped. Press **Ctrl+C** in that window to stop it.
 
 You can also run these steps manually from PowerShell in this project folder:
 
@@ -112,7 +114,7 @@ There is no preview or confirmation popup. All three options update only their o
 
 While AI is running, **Cancel** stops the streamed Ollama request and its worker, freeing the inference CPU. The existing saved plan stays visible and remains saved if generation fails or is cancelled. The model may remain loaded in RAM for its normal idle period; it no longer generates tokens. Reloading the page reconnects to an active job so you can still cancel it. Restarting the app retains completed plans and does not resume unfinished jobs.
 
-Each meal card shows its date, dish image, cooking time, name and calories per serving. Today's meal has a thick green outline. Hovering other cards uses a thin border and keeps photos at full brightness. Click the main card area, or focus it and press Enter, to open dish details and preparation advice. Saved snapshots stay unchanged when recipes are edited, unless you explicitly replace that meal. An old saved singleton plan is migrated into weekly history automatically on first access. History is retained in SQLite, with one record per week.
+Each meal card shows its date, dish image, cooking time, name and calories per serving. Today's meal has a thick green outline. Hovering other cards uses a thin border and keeps photos at full brightness. Click the main card area, or focus it and press Enter, to open dish details and preparation advice. Saved snapshots stay unchanged when recipes are edited, unless you explicitly replace that meal. An old saved singleton plan is migrated into weekly history automatically on first access. History is retained in the browser and synced to the local/hosted database, with one record per week.
 
 **Delete a dish:** in Dish List, click **Delete** and confirm the warning. Cancelling or dismissing the confirmation changes nothing. Confirming removes the dish from Dish List and marks every occurrence across past, current and upcoming weeks as **Dish deleted**. Each scheduled date and slot stays in place, without the old photo, recipe details or preparation advice. This state survives reloads and backups. Other dishes and empty slots stay unchanged. Use the slot's existing **Edit** button to replace a deleted dish with a saved dish.
 
@@ -140,11 +142,11 @@ The website runs locally, but source retrieval, missing-food lookups, and up-to-
 
 ## Storage, backup, and troubleshooting
 
-- Recipes, food values, settings and weekly plans live in **`data/meals.sqlite3`**; dish photos live in **`data/photos/`**. The browser's storage is not the database, so closing the browser does not lose recipes.
-- **Settings ? Export Backup** downloads a single ZIP containing recipes, food values, all weekly plans (including empty future slots), each week's saved expanded/collapsed choice, uploaded dish images, cached source/nutrition data and all saved/effective settings, including advanced configuration and API keys. The footer's Export backup action downloads the same full ZIP.
-- **Settings ? Import Backup** asks for confirmation after you select a file: "Importing this backup will replace all current data with the contents of the backup file. Do you want to continue?" Cancelling or closing the confirmation leaves all current records, images, settings and collapse choices intact. After confirmation, the app validates the versioned JSON, required tables, record counts, dates, collapse choices, image references, image hashes and PNG data before changing live files or records. Invalid, corrupt or incomplete archives leave existing data intact. Imports wait for you to finish/cancel active AI tasks; the app stages validated files and rolls back images, configuration and SQL changes if applying them fails. Restored collapse choices still leave the current week expanded; older backups without these choices default to expanded weeks.
+- Recipes, food values, settings, weekly plans, photos and pending operations save first in **IndexedDB**. Closing/reopening the browser preserves them. Background sync updates local SQLite/photos or hosted Supabase; keep cookies to retain the hosted identity. Export a backup before clearing browser site data, especially while changes are pending.
+- **Settings ? Export Backup** downloads a single ZIP containing recipes, food values, all weekly plans (including empty future slots), each week's saved expanded/collapsed choice, uploaded dish images and all saved/effective settings, including pending local edits, including advanced configuration and API keys. The footer's Export backup action downloads the same full ZIP.
+- **Settings ? Import Backup** asks for confirmation after you select a file: "Importing this backup will replace all current data with the contents of the backup file. Do you want to continue?" Cancelling or closing the confirmation leaves all current records, images, settings and collapse choices intact. After confirmation, the app validates the versioned JSON, required tables, record counts, dates, collapse choices, image references, image hashes and PNG data before the browser changes local data. Invalid, corrupt or incomplete archives leave existing data intact. Imports wait for you to finish/cancel active AI tasks; one IndexedDB transaction applies the local replacement and outbox entries; a failed local transaction keeps the old data. Background sync stages images and restores the server records atomically. Restored collapse choices still leave the current week expanded; older backups without these choices default to expanded weeks.
 - Backup version 1 contains `backup-v1.json` and an `images/` folder. Photo URLs use the same content-derived filenames after restore, so recipe and historical plan images reconnect automatically. Limits are 256 MB per ZIP, 512 MB expanded, and 64 MB for the structured JSON. Backups are unencrypted and contain API keys; keep the ZIP private. Installed Ollama/Whisper models, binaries and the application code are separate from user data and are not bundled; use the setup instructions on another laptop before restoring.
-- For a manual restorable copy, stop the app and copy `data/` plus `config.local.json` if present.
+- Use the UI ZIP export for a complete current backup, including pending edits. A manual copy of `data/` plus `config.local.json` contains only changes that have reached the local server.
 - The server binds only to `127.0.0.1`. Keep it local; it is not designed for public hosting or multiple users.
 - **Port busy:** run `.\.venv\Scripts\python.exe app.py --port 8766 --open`.
 - **Ollama offline:** open Ollama. If its app is not running, `ollama serve` starts its server. Do not start a second copy if the tray app already serves it.
