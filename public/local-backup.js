@@ -4,6 +4,36 @@
 // before opening the single IndexedDB replacement transaction.
 const HealthBackup=(()=>{
   const encoder=new TextEncoder(),decoder=new TextDecoder('utf-8',{fatal:true}),MAX=256*1024*1024;
+  let exportRepairs=[];
+  function recordedIngredients(recipe){
+    if(!recipe||typeof recipe!=='object')return null;
+    if(Array.isArray(recipe.ingredients))return {items:recipe.ingredients,source:'ingredients'};
+    let empty=null;
+    for(const field of ['groups','legacy_groups'])if(Array.isArray(recipe[field])){
+      const groups=recipe[field];
+      if(!groups.every(g=>g&&typeof g==='object'&&(g.ingredients===undefined||Array.isArray(g.ingredients))))continue;
+      if(groups.length)return {items:groups.flatMap(g=>g.ingredients||[]),source:field};
+      empty={items:[],source:field};
+    }
+    return empty;
+  }
+  function compatibleManifest(input){
+    // Archive compatibility only: never rewrite live records or the outbox.
+    const manifest=structuredClone(input),repairs=[],rows=Array.isArray(manifest?.tables?.recipes)?manifest.tables.recipes:[],library=new Map(rows.filter(r=>r&&typeof r.id==='string').map(r=>[r.id,r.body]));
+    function fill(recipe,fallback){
+      if(!recipe||typeof recipe!=='object'||Array.isArray(recipe)||'ingredients' in recipe)return null;
+      const own=recordedIngredients(recipe),linked=own?null:recordedIngredients(fallback);
+      recipe.ingredients=structuredClone(own?.items||linked?.items||[]);
+      return own?.source||(linked?'saved_recipe':'unavailable');
+    }
+    for(const row of rows)fill(row?.body,null);
+    for(const row of Array.isArray(manifest?.tables?.plans)?manifest.tables.plans:[])for(const day of Array.isArray(row?.body?.days)?row.body.days:[]){
+      if(!day?.recipe||day.deleted)continue;
+      const source=fill(day.recipe,library.get(day.recipe.id||day.recipe_id));
+      if(source)repairs.push({week:row.id,date:day.date,recipe_id:day.recipe_id,name:day.recipe.name,source});
+    }
+    return {manifest,repairs};
+  }
   function parseJSON(source){
     let at=0;const space=()=>{while(/[\t\n\r ]/.test(source[at]||'!'))at++;};
     function string(){const start=at++;while(at<source.length){if(source[at]==='\\'){at+=2;continue;}if(source[at++]==='"')return JSON.parse(source.slice(start,at));}throw new Error('Invalid JSON string.');}
@@ -64,9 +94,9 @@ const HealthBackup=(()=>{
     function photos(value){if(Array.isArray(value))value.forEach(photos);else if(object(value))for(const [key,item] of Object.entries(value)){if(key==='photo_url'&&item){if(typeof item!=='string'||!/^\/media\/[a-f0-9]{64}\.png$/.test(item)||!images.has(item.slice(7)))bad('A record references a missing image.');}else photos(item);}}photos(manifest.tables);
     return {tables,document:{tables:manifest.tables,config:manifest.settings,images:manifest.images}};
   }
-  async function exportZip(){const data=await HealthLocal.read(),s=HealthLocal.view(data),map=HealthLocal.entities(data),active=new Set(Object.keys(map).filter(k=>k.startsWith('photos/')).map(k=>k.slice(7))),doc=documentFrom(map,s.settings,[...active]),manifest={format:'meal-notebook-backup',version:1,created_at:new Date().toISOString(),tables:doc.tables,settings:s.settings,images:doc.images,record_counts:Object.fromEntries(Object.entries(doc.tables).map(([k,v])=>[k,v.length]))},images=new Map(data.photos.filter(p=>active.has(p.name)).map(p=>[p.name,p.blob]));validate(manifest,images);const entries=[['backup-v1.json',encoder.encode(JSON.stringify(manifest))]];for(const p of data.photos.filter(p=>active.has(p.name)))entries.push(['images/'+p.name,new Uint8Array(await p.blob.arrayBuffer())]);return zip(entries);}
-  async function importZip(file){let entries;try{entries=await unzip(file);}catch(error){throw new Error('Could not read backup: '+error.message);}if(!entries.has('backup-v1.json'))throw new Error('Missing backup-v1.json.');const manifest=parseJSON(decoder.decode(entries.get('backup-v1.json'))),images=new Map([...entries].filter(([k])=>k.startsWith('images/')&&k!=='images/').map(([k,v])=>[k.slice(7),new Blob([v],{type:'image/png'})]));const {document}=validate(manifest,images);const current=await HealthLocal.read();if(current.meta.profile.hosted&&(file.size>48*1024*1024||[...entries.values()].reduce((n,v)=>n+v.length,0)>48*1024*1024||encoder.encode(JSON.stringify(document)).length>12*1024*1024||[...images.values()].reduce((n,v)=>n+v.size,0)>32*1024*1024))throw new Error('The hosted beta supports 48 MB backups, 12 MB records and 32 MB photos. Existing data was kept.');for(const [name,blob] of images)await HealthLocal.verifyPhoto(name,blob);
+  async function exportZip(){exportRepairs=[];const data=await HealthLocal.read(),s=HealthLocal.view(data),map=HealthLocal.entities(data),active=new Set(Object.keys(map).filter(k=>k.startsWith('photos/')).map(k=>k.slice(7))),doc=documentFrom(map,s.settings,[...active]),rawManifest={format:'meal-notebook-backup',version:1,created_at:new Date().toISOString(),tables:doc.tables,settings:s.settings,images:doc.images,record_counts:Object.fromEntries(Object.entries(doc.tables).map(([k,v])=>[k,v.length]))},images=new Map(data.photos.filter(p=>active.has(p.name)).map(p=>[p.name,p.blob])),{manifest,repairs}=compatibleManifest(rawManifest);exportRepairs=repairs;validate(manifest,images);const entries=[['backup-v1.json',encoder.encode(JSON.stringify(manifest))]];for(const p of data.photos.filter(p=>active.has(p.name)))entries.push(['images/'+p.name,new Uint8Array(await p.blob.arrayBuffer())]);return zip(entries);}
+  async function importZip(file){let entries;try{entries=await unzip(file);}catch(error){throw new Error('Could not read backup: '+error.message);}if(!entries.has('backup-v1.json'))throw new Error('Missing backup-v1.json.');const manifest=compatibleManifest(parseJSON(decoder.decode(entries.get('backup-v1.json')))).manifest,images=new Map([...entries].filter(([k])=>k.startsWith('images/')&&k!=='images/').map(([k,v])=>[k.slice(7),new Blob([v],{type:'image/png'})]));const {document}=validate(manifest,images);const current=await HealthLocal.read();if(current.meta.profile.hosted&&(file.size>48*1024*1024||[...entries.values()].reduce((n,v)=>n+v.length,0)>48*1024*1024||encoder.encode(JSON.stringify(document)).length>12*1024*1024||[...images.values()].reduce((n,v)=>n+v.size,0)>32*1024*1024))throw new Error('The hosted beta supports 48 MB backups, 12 MB records and 32 MB photos. Existing data was kept.');for(const [name,blob] of images)await HealthLocal.verifyPhoto(name,blob);
     await HealthLocal.write((data,tx)=>{let order=data.meta.order||0;for(const [name,blob] of images){tx.objectStore('photos').put({name,blob});tx.objectStore('outbox').put({id:HealthLocal.id(),kind:'photo',staged:true,order:++order,name});}tx.objectStore('outbox').put({id:HealthLocal.id(),kind:'restore',order:++order,base:data.meta.cursor,document,entities:flatten(document)});tx.objectStore('meta').put({id:'order',value:order});tx.objectStore('meta').put({id:'defaults',value:manifest.settings});tx.objectStore('meta').put({id:'images',value:manifest.images});});HealthLocal.schedule();
   }
-  return {exportZip,importZip,zip,unzip,validate,parseJSON};
+  return {exportZip,importZip,zip,unzip,validate,parseJSON,compatibleManifest,get exportRepairs(){return structuredClone(exportRepairs);}};
 })();

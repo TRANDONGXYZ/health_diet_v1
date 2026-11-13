@@ -14,3 +14,19 @@
 /* Fixed viewport geometry and internal scrolling for all existing dialogs. */
 .header-actions{flex-wrap:wrap}@media(max-width:800px){.topbar{flex-wrap:wrap}#connection-status{display:inline}}
 html{scrollbar-gutter:stable}html.modal-open,body.modal-open{overflow:hidden;overscroll-behavior:none;overflow-anchor:none}dialog{position:fixed;inset:0;margin:auto;height:min(820px,92dvh);max-height:92dvh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}#add-week-modal{height:min(380px,92dvh)}dialog .table-scroll,dialog #replace-list,dialog #replacement-details{overscroll-behavior:contain}.future-week[open]>.week-summary .past-arrow{transform:rotate(90deg)}
+
+/* The meal picker has exactly two scroll regions; its frame/header stay fixed. */
+#replace-modal{width:min(1180px,calc(100vw - 28px));scrollbar-gutter:auto}
+#replace-modal[open]{display:flex;flex-direction:column;overflow:hidden}
+#replace-modal .modal-head{flex:0 0 auto;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+#replace-modal .modal-head .grow{min-width:130px}
+#replace-modal .picker-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#replace-modal #replace-message{flex:0 0 auto;margin:0 0 12px}
+#replace-modal .replacement-layout{flex:1;min-height:0;min-width:0;overflow:hidden;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr)}
+#replace-modal .replacement-choices{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}
+#replace-modal .replacement-choices>label{flex:0 0 auto}
+#replace-modal #replace-list{flex:1;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+#replace-modal #replacement-details{min-width:0;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-top:0;border-left:1px solid var(--border);padding:0 0 0 24px;overflow-wrap:anywhere}
+#replace-modal .replacement-choice>span{min-width:0;overflow-wrap:anywhere}
+#replace-modal .calorie-summary .warning{min-width:0}
+@media(max-width:600px){#replace-modal .replacement-layout{gap:12px}#replace-modal #replacement-details{padding-left:12px}#replace-modal .replacement-choice{padding:8px;gap:6px}#replace-modal .replacement-choice img{width:36px;height:36px}}

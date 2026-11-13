@@ -57,6 +57,26 @@ for start in ('2026-11-02','2026-10-26'):
     monday=date.fromisoformat(start)
     plan={'week_start':start,'generated_on':start,'method':'AI','has_ai':True,'days':[{'recipe_id':archived['id'],'date':(monday+timedelta(days=i)).isoformat(),'recipe':weekly.snapshot(archived),'timing':'morning','prep':'Archived preparation.','reason':'Saved history.'} for i in range(7)]}
     store.put('plans',start,plan)
+if os.environ.get('MEAL_TEST_LEGACY_SNAPSHOTS'):
+    import copy
+    import base64
+    from test_weekly import png
+    image=app.dish_photos.save({'filename':'legacy.png','image':base64.b64encode(png()).decode()})['photo_url']
+    legacy={'id':'000-legacy','name':'First legacy soup','vegan':True,'servings':2,'photo_url':image,'notes':('Saved cooking detail.\n'*180),
+        'groups':[{'title':'Broth','instructions':'Keep these cooking details.','ingredients':[{'name':'tofu','grams':200,'quantity':'200 g'}]}]}
+    store.put('recipes',legacy['id'],legacy)
+    for n in range(30):store.put('recipes',f'list-{n:02}',dict(legacy,id=f'list-{n:02}',name=f'Saved dish {n:02}',ingredients=[{'name':'tofu','grams':100}]))
+    plan=store.get('plans','2026-11-02')
+    for index,kind in enumerate(('groups','legacy_groups','library','unavailable')):
+        snapshot={'id':legacy['id'] if kind!='unavailable' else 'missing-recipe','name':'Historical '+kind,'vegan':True,'servings':3,'photo_url':image,'notes':'Historical details stay unchanged.',
+            'calories':{'total':111,'per_serving':37,'complete':False,'missing':['Historical estimate']}}
+        if kind in ('groups','legacy_groups'):snapshot[kind]=[{'title':'Original ingredients','instructions':'Original technique.','ingredients':[{'name':'tofu','grams':100,'quantity':'original 100 g'}]}]
+        plan['days'][index]={'date':plan['days'][index]['date'],'recipe_id':snapshot['id'],'recipe':snapshot,'prep':'Historical preparation.','timing':'night before','reason':'Historical reason.'}
+    plan['days'][4]={'date':plan['days'][4]['date'],'recipe_id':legacy['id'],'recipe':dict(snapshot,id=legacy['id'],name='Explicit empty list',ingredients=[],groups=legacy['groups'])}
+    plan['days'][5]={'date':plan['days'][5]['date'],'recipe_id':'deleted-old','deleted':True}
+    plan['days'][6]={'date':plan['days'][6]['date'],'recipe_id':None}
+    store.put('plans',plan['week_start'],plan)
+
 server=ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('MEAL_TEST_PORT','8768'))),Handler)
 try:server.serve_forever()
 finally:server.server_close()

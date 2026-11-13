@@ -44,6 +44,44 @@ class AdvanceAndBackupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'already exists'):app.post('/api/plan/add',{'week_start':'2026-11-16'})
         self.assertEqual(store.get('plans',added['week_start']),added)
 
+    def test_legacy_meal_snapshots_export_without_editing_saved_data(self):
+        library=dict(self.recipe,groups=[{'title':'Current source','ingredients':[{'name':'tofu','grams':300}]}])
+        library.pop('ingredients')
+        store.put('recipes',library['id'],library)
+        common={'id':library['id'],'name':'Historical name','notes':'Keep historical instructions.','servings':3,
+                'calories':{'total':111,'per_serving':37,'complete':False,'missing':['Recorded estimate']}}
+        snapshots=[dict(common,groups=[{'title':'Original source','instructions':'Keep technique.','ingredients':[{'name':'tofu','grams':100}]}]),
+                   dict(common,legacy_groups=[{'ingredients':[{'name':'tofu','grams':150}]}]),dict(common),
+                   dict(common,id='missing-library-recipe'),dict(common,ingredients=[],groups=library['groups'])]
+        plan={'week_start':'2026-11-02','days':[{'date':(date(2026,11,2)+timedelta(days=i)).isoformat(),'recipe_id':r['id'],'recipe':r,'prep':'Keep preparation.'} for i,r in enumerate(snapshots)]}
+        store.put('plans',plan['week_start'],plan)
+        raw=backups.export_zip();manifest,_=backups.read_zip(raw)
+        days=manifest['tables']['plans'][0]['body']['days']
+        self.assertEqual([d['recipe']['ingredients'] for d in days],[[{'name':'tofu','grams':100}],[{'name':'tofu','grams':150}],[{'name':'tofu','grams':300}],[],[]])
+        for original,day in zip(snapshots,days):
+            self.assertEqual({k:v for k,v in day['recipe'].items() if k!='ingredients'},{k:v for k,v in original.items() if k!='ingredients'})
+        self.assertEqual(store.get('plans',plan['week_start']),plan,'Export must not rewrite the live weekly history')
+        with store.db() as c:self.assertNotIn('ingredients',json.loads(c.execute('SELECT body FROM recipes WHERE id=?',(library['id'],)).fetchone()[0]))
+        backups.import_zip(raw)
+        self.assertEqual(store.get('plans',plan['week_start'])['days'],days)
+
+    def test_old_zip_with_grouped_snapshot_imports_without_weakening_validation(self):
+        plan_jobs.instant({'method':'rotation'})
+        raw=backups.export_zip()
+        def old_format(data):
+            for row in data['tables']['plans']:
+                for day in row['body']['days']:
+                    r=day['recipe'];r['groups']=[{'ingredients':r.pop('ingredients'),'instructions':'Retain this old detail.'}]
+        legacy=self.repack(raw,modify=old_format)
+        restored,_=backups.read_zip(legacy)
+        r=restored['tables']['plans'][0]['body']['days'][0]['recipe']
+        self.assertEqual(r['ingredients'],self.recipe['ingredients'])
+        self.assertEqual(r['groups'][0]['instructions'],'Retain this old detail.')
+        invalid=self.repack(raw,modify=lambda d:d['tables']['plans'][0]['body']['days'][0]['recipe'].update(ingredients='corrupt'))
+        before=store.all_items('plans')
+        with self.assertRaises(ValueError):backups.import_zip(invalid)
+        self.assertEqual(store.all_items('plans'),before)
+
     def test_eight_future_weeks_excludes_current_and_ninth_is_rejected(self):
         plan_jobs.instant({'method':'rotation'})
         monday=date(2026,11,9)

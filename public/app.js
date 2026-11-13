@@ -322,9 +322,12 @@ function openReplacement(week,index) {
   const day=(state.plans||[]).find(p=>p.week_start===week)?.days[index];if(!day)return;
   replacement={week,date:day.date,base:state.versions?.['meals/'+week+'/'+day.date]||0,original:structuredClone(day),recipeId:null,empty:!day.recipe_id};$('#replace-search').value='';$('#replace-title').textContent=replacement.empty?'Add dish':'Replace meal';$('#replace-confirm').textContent=replacement.empty?'Add':'Replace';
   $('#replace-date').textContent=dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long',year:'numeric'});
-  $('#replace-message').textContent=replacement.empty?'Select a saved dish, review its details, then click Add.':'Select any saved dish, review its details, then click Replace.';
-  $('#replacement-details').hidden=true;$('#replacement-details').innerHTML='';$('#replace-modal').classList.remove('expanded');$('#replace-confirm').disabled=true;
-  renderReplacementList();open('#replace-modal');
+  $('#replace-message').textContent='';$('#replace-message').hidden=true;
+  $('#replacement-details').hidden=false;$('#replacement-details').innerHTML='';$('#replace-modal').classList.add('expanded');$('#replace-confirm').disabled=true;
+  renderReplacementList();
+  const first=$('.replacement-choice',$('#replace-list'));
+  if(replacement.empty&&first)selectReplacement(first.dataset.id);
+  open('#replace-modal',replacement.empty&&first?'#replace-confirm':null);
 }
 function renderReplacementList() {
   const query=normalize($('#replace-search').value),dishes=state.recipes.filter(r=>normalize(r.name).includes(query));
@@ -335,11 +338,16 @@ function selectReplacement(id) {
   replacement.recipeId=id;renderReplacementList();$('#replace-modal').classList.add('expanded');
   $('#replacement-details').hidden=false;$('#replacement-details').innerHTML=detailsMarkup(recipe,true);$('#replace-confirm').disabled=false;
   $('#replacement-details').scrollTop=0;
-  if(innerWidth<800){const dialog=$('#replace-modal');dialog.scrollTo({top:Math.max(0,$('#replacement-details').offsetTop-dialog.clientHeight/3),behavior:'instant'});}
 }
+document.addEventListener('keydown',event=>{
+  if(event.key!=='/'||event.ctrlKey||event.metaKey||event.altKey||event.isComposing||!$('#replace-modal').open||$$('dialog[open]').at(-1)!==$('#replace-modal'))return;
+  const target=event.target;
+  if(target.isContentEditable||target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))return;
+  event.preventDefault();$('#replace-search').focus({preventScroll:true});
+});
 async function replaceMeal() {
   if(!replacement?.recipeId||weekMutationPending)return;weekMutationPending=true;$('#replace-confirm').disabled=true;
-  const target={...replacement};$('#replace-message').textContent='Saving replacement...';
+  const target={...replacement};$('#replace-message').textContent='Saving replacement...';$('#replace-message').hidden=false;
   try {
     await api('/api/plan/replace',{week_start:target.week,date:target.date,recipe_id:target.recipeId,base:target.base,original:target.original});
     await refresh();closeDialog($('#replace-modal'));replacement=null;notify(target.empty?'Dish added.':'Meal replaced.');
@@ -582,7 +590,7 @@ function saveWeekExpansion(week,expanded){
 $('#plan-history').addEventListener('toggle',rememberWeekExpansion,true);
 $('#future-weeks').addEventListener('toggle',rememberWeekExpansion,true);
 function clearBackupFeedback(){$$('#settings-modal [data-persist=true]').forEach(node=>node.remove());$('#backup-message').textContent='';}
-async function exportBackup(){clearBackupFeedback();await work('Exporting full ZIP backup',async()=>{await expansionSaves;const url=URL.createObjectURL(await HealthBackup.exportZip()),link=document.createElement('a');link.href=url;link.download='meal-notebook-backup.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#backup-message').textContent='Backup exported, including pending local changes.';},{pollAI:false});}
+async function exportBackup(){clearBackupFeedback();await work('Exporting full ZIP backup',async()=>{await expansionSaves;const url=URL.createObjectURL(await HealthBackup.exportZip()),link=document.createElement('a');link.href=url;link.download='meal-notebook-backup.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);const repaired=HealthBackup.exportRepairs;$('#backup-message').textContent='Backup exported, including pending local changes.'+(repaired.length?' Ingredient lists recovered for '+repaired.length+' saved meals: '+repaired.slice(0,3).map(r=>r.name+' ('+r.date+')').join(', ')+(repaired.length>3?'?':'')+'.':'');},{pollAI:false});}
 $('#backup-file').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;clearBackupFeedback();
   try{

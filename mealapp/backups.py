@@ -1,5 +1,6 @@
 """Versioned ZIP backups; validation precedes a locked, rollback-capable restore."""
 import hashlib
+import copy
 import io
 import json
 import math
@@ -30,6 +31,43 @@ def json_bytes(value):
     return json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
 
 
+def compatible_manifest(data):
+    """Add the flat list required by ZIP v1 without changing saved snapshots.
+
+    Prefer a snapshot's own grouped ingredients to the current library recipe.
+    All other historical fields and the original groups stay byte-for-byte data
+    equivalents; no calorie recalculation, source extraction or guessing occurs.
+    """
+    result=copy.deepcopy(data)
+    if not isinstance(result,dict) or not isinstance(result.get('tables'),dict):return result
+    def recorded(recipe):
+        if not isinstance(recipe,dict):return None
+        if isinstance(recipe.get('ingredients'),list):return recipe['ingredients']
+        empty=None
+        for field in ('groups','legacy_groups'):
+            groups=recipe.get(field)
+            if isinstance(groups,list) and all(isinstance(g,dict) and isinstance(g.get('ingredients',[]),list) for g in groups):
+                if groups:return [i for g in groups for i in g.get('ingredients',[])]
+                empty=[]
+        return empty
+    def fill(recipe,fallback=None):
+        if not isinstance(recipe,dict) or 'ingredients' in recipe:return
+        items=recorded(recipe)
+        if items is None:items=recorded(fallback)
+        recipe['ingredients']=copy.deepcopy(items if items is not None else [])
+    rows=result['tables'].get('recipes',[])
+    library={row['id']:row.get('body') for row in rows if isinstance(row,dict) and isinstance(row.get('id'),str)} if isinstance(rows,list) else {}
+    for recipe in library.values():fill(recipe)
+    plans=result['tables'].get('plans',[])
+    for row in plans if isinstance(plans,list) else []:
+        plan=row.get('body') if isinstance(row,dict) else None
+        for day in plan.get('days',[]) if isinstance(plan,dict) and isinstance(plan.get('days'),list) else []:
+            if isinstance(day,dict) and not day.get('deleted'):
+                snapshot=day.get('recipe')
+                fill(snapshot,library.get(snapshot.get('id') or day.get('recipe_id')) if isinstance(snapshot,dict) else None)
+    return result
+
+
 def export_zip():
     from . import hosted
     hosted.ensure_all_photos()
@@ -52,6 +90,7 @@ def export_zip():
             settings['usda_api_key']=store.get('state','settings',{}).get('usda_api_key','DEMO_KEY')
         manifest={'format':'meal-notebook-backup','version':1,'created_at':datetime.now(timezone.utc).isoformat(),
                   'tables':tables,'record_counts':{key:len(rows) for key,rows in tables.items()},'settings':settings,'images':list(images)}
+        manifest=compatible_manifest(manifest)
         validate_data(manifest,images)
         data=json_bytes(manifest)
         if len(data)>MAX_JSON or len(data)+sum(map(len,images.values()))>MAX_EXPANDED:
@@ -98,6 +137,7 @@ def read_zip(raw):
             manifest=json.loads(archive.read(MANIFEST).decode('utf-8'),object_pairs_hook=object_pairs,
                                 parse_constant=lambda value:(_ for _ in ()).throw(ValueError('Invalid number in backup.')))
             images={name[7:]:archive.read(name) for name in names if name.startswith('images/') and name!='images/'}
+        manifest=compatible_manifest(manifest)
         validate_data(manifest,images)
         return manifest,images
     except (zipfile.BadZipFile,UnicodeError,KeyError,TypeError,RecursionError,RuntimeError,NotImplementedError) as exc:
