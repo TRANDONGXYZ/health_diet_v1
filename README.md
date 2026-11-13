@@ -53,7 +53,7 @@ For advanced settings, copy `config.example.json` to **`config.local.json`**. Yo
 
 ### Create a dish
 
-Open **Dish List → Create recipe**. Paste an article or video URL and click **Retrieve source**, then **Extract recipe with AI**. Alternatively, paste a transcript or recipe text and extract it, or enter the recipe manually.
+Open **Dish List → Create recipe**. **Retrieve source** is temporarily disabled for all source types. Paste a transcript or recipe text, or upload a transcript/audio/video file, then click **Extract recipe with AI**. Manual entry remains available. Cancel and Save Recipe stay in the fixed header while the editor body scrolls; Recipe Details keeps Edit in its header too. Closing a dialog clears its errors and discards feedback from requests belonging to that opening.
 
 - Articles with Schema.org Recipe data use their ingredient and instruction fields, avoiding surrounding blog text. Other articles use readable HTML text.
 - YouTube retrieval tries Vietnamese then English captions, including automatic captions. Other captioned video sources can be tried with **Source type → Other video**, using yt-dlp.

@@ -30,3 +30,10 @@ html{scrollbar-gutter:stable}html.modal-open,body.modal-open{overflow:hidden;ove
 #replace-modal .replacement-choice>span{min-width:0;overflow-wrap:anywhere}
 #replace-modal .calorie-summary .warning{min-width:0}
 @media(max-width:600px){#replace-modal .replacement-layout{gap:12px}#replace-modal #replacement-details{padding-left:12px}#replace-modal .replacement-choice{padding:8px;gap:6px}#replace-modal .replacement-choice img{width:36px;height:36px}}
+
+/* Recipe headers share the picker's fixed controls and one scrolling body. */
+#recipe-modal[open],#detail-modal[open]{display:flex;flex-direction:column;overflow:hidden;scrollbar-gutter:auto}
+#recipe-modal .modal-head,#detail-modal .modal-head{flex:0 0 auto;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.picker-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dialog-body{flex:1;min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:4px}
+[data-action=retrieve]:disabled{cursor:not-allowed}

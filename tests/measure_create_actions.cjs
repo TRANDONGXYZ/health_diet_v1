@@ -16,7 +16,7 @@ async function run(){
     await page.addInitScript(()=>{
       window.__createTiming={};
       document.addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.closest('#add-week-modal'))window.__createTiming.start=performance.now();},true);
-      document.addEventListener('click',event=>{if(event.target.closest('#recipe-form button[type=submit]'))window.__createTiming.start=performance.now();},true);
+      document.addEventListener('click',event=>{if(event.target.closest('#save-recipe'))window.__createTiming.start=performance.now();},true);
       const observer=new MutationObserver(()=>{
         const m=window.__createTiming;if(!m.start||m.end)return;
         if(m.action==='week'&&document.querySelector('.future-week[data-week="'+m.week+'"]'))m.end=performance.now();

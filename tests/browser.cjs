@@ -126,9 +126,8 @@ async function run() {
   });
   await page.getByRole('button',{name:'+ Create recipe',exact:true}).click();
   await form.locator('[name=source_url]').fill(sourceUrl);
-  await page.getByRole('button',{name:'Retrieve source',exact:true}).click();
-  await page.waitForFunction(text => document.querySelector('[name=source_text]').value === text,speechText);
-  assert.match(await page.locator('#recipe-message').innerText(),/Speech recognition can mishear/);
+  assert.equal(await page.getByRole('button',{name:'Retrieve source',exact:true}).isDisabled(),true);
+  await page.locator('[name=source_text]').fill(speechText);
   await page.getByRole('button',{name:'Extract recipe with AI',exact:true}).click();
   await page.locator('#recipe-modal').getByText(/Local AI is generating a response · 4m 35s/).waitFor();
   await page.waitForFunction(() => document.querySelector('#recipe-form [name=name]').value === 'Tofu with tomatoes');

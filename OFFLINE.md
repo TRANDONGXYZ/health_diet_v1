@@ -64,9 +64,14 @@ not report a successful save. Browser locks serialize concurrent tabs; edits use
 a different lock from the network sync loop, so a slow request cannot block a
 local commit.
 
-`GET /api/sync/bootstrap` is the initial full transfer. Normal refresh/reconnect
-uses `GET /api/sync/pull?since=CURSOR`, which returns only changed records and
-tombstones. The application shell's cache version is computed from its files;
+`GET /api/sync/bootstrap` is the initial full transfer. Background sync runs
+only when saved changes are pending. It uses `GET /api/sync/pull?since=CURSOR`
+to reconcile changed records and tombstones before uploading the ordered outbox.
+An empty queue makes no sync requests: no recurring polling, window-focus sync,
+or sync for scrolling or switching app tabs. Failed uploads stay queued for
+backoff retries; reconnecting or reopening resumes pending work. Saving an
+unchanged record creates no upload. Remote edits from another device are
+reconciled on the next pending upload rather than polled while idle. The application shell's cache version is computed from its files;
 new workers install a matching complete shell. Private API responses, JWTs and
 cookies are never stored in the public shell cache.
 
