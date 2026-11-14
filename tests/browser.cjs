@@ -13,7 +13,7 @@ const errors = [];
 const wait = ms => new Promise(r => setTimeout(r,ms));
 async function ready() { for(let n=0;n<60;n++){ try{const r = await fetch('http://127.0.0.1:8767'); if(r.ok) return;}catch{} await wait(200); } throw new Error('Server failed to start'); }
 async function run() {
-  await ready(); browser = await chromium.launch({channel:'msedge',headless:true,args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream']});
+  await ready(); browser = await chromium.launch({channel:'msedge',headless:true});
   const page = await browser.newPage({viewport:{width:1440,height:1000}});
   page.on('pageerror',e => errors.push(e.message));
   await page.goto('http://127.0.0.1:8767');
@@ -45,11 +45,8 @@ async function run() {
   assert.match(await page.locator('#dish-list').innerText(),/No matching dishes/);
   await page.locator('#running-filter').selectOption('yes');
   assert.equal(await page.locator('.dish-card').count(),1);
-  await page.locator('[data-running-id]').uncheck();
-  await page.waitForFunction(()=>document.querySelectorAll('.dish-card').length===0);
+  assert.equal(await page.locator('#dish-list [type=checkbox]').count(),0);
   await page.locator('#running-filter').selectOption('all');
-  await page.locator('[data-running-id]').check();
-  await page.waitForFunction(()=>document.querySelector('.dish-card .pill') && document.querySelector('.dish-card').textContent.includes('Good for Running'));
   await page.getByRole('tab',{name:'Weekly Meals'}).click();
   await page.locator('#plan-running').check();
   const expected=await page.evaluate(async()=>{const s=await(await fetch('/api/state')).json();return s.calendar.dates.length;});
@@ -78,28 +75,6 @@ async function run() {
   assert.equal(await form.locator('[data-action=translate-recipe],[data-action=estimate]').count(),0);
   await page.getByRole('button',{name:'Save recipe',exact:true}).click();
   await page.locator('#recipe-modal').waitFor({state:'hidden'});
-  // The photo flow is tested with explicit service fixtures. Live model/network checks are separate.
-  await page.route('**/api/online/nutrition/identify',r => r.fulfill({json:{name:'broccoli raw',confidence:'medium',explanation:'Review the food name.'}}));
-  await page.route('**/api/online/nutrition/search',r => r.fulfill({json:{matches:[{name:'Broccoli, raw',kcal:34,source:'https://fdc.nal.usda.gov/food-details/170379/nutrients',retrieved_at:new Date().toISOString(),nutrients:[{name:'Vitamin C',amount:89.2,unit:'MG'}]}]}}));
-  await page.route('**/api/online/nutrition/guidance',r => r.fulfill({json:{items:[],sources:[],warnings:['No food-specific guidance found.']}}));
-  await page.getByRole('button',{name:'Photo nutrition'}).click();
-  await page.getByRole('button',{name:'Use laptop camera'}).click();
-  await page.waitForFunction(() => document.querySelector('#camera-feed').videoWidth > 0);
-  await page.getByRole('button',{name:'Take photo',exact:true}).click();
-  await page.waitForFunction(() => !document.querySelector('#photo-preview').hidden);
-  assert.equal(await page.locator('#camera-feed').evaluate(e => e.srcObject),null);
-  const encodedImage = await page.evaluate(() => {const canvas = document.createElement('canvas');canvas.width=100;canvas.height=100;const ctx = canvas.getContext('2d');ctx.fillStyle='#b9d793';ctx.fillRect(0,0,100,100);return canvas.toDataURL('image/png').split(',')[1];});
-  const image = Buffer.from(encodedImage,'base64');
-  await page.locator('#photo-upload').setInputFiles({name:'test.png',mimeType:'image/png',buffer:image});
-  await page.getByRole('button',{name:'Identify food with AI'}).click();
-  await page.locator('#nutrition-query').waitFor();
-  await page.waitForFunction(() => document.querySelector('#nutrition-query').value === 'broccoli raw');
-  await page.getByRole('button',{name:'Look up online'}).click();
-  await page.getByRole('button',{name:'Use this match'}).click();
-  await page.waitForFunction(() => document.querySelector('#nutrition-guidance').textContent.includes('No verified daily amount'));
-  assert.match(await page.locator('#nutrition-detail').innerText(),/Vitamin C/);
-  assert.match(await page.locator('#nutrition-detail').innerText(),/89.2/);
-  await page.getByRole('button',{name:'Close photo nutrition'}).click();
   fs.mkdirSync('test-results',{recursive:true});
   await page.screenshot({path:'test-results/dish-list.png',fullPage:true});
   await page.getByRole('tab',{name:'Weekly Meals'}).click();
@@ -112,7 +87,7 @@ async function run() {
   await page.screenshot({path:'test-results/mobile-editor.png',fullPage:true});
   await page.getByRole('button',{name:'Close recipe editor'}).click();
   page.once('dialog',d => d.accept());
-  await page.getByRole('button',{name:'Delete',exact:true}).click();
+  await page.getByRole('button',{name:'Delete recipe',exact:true}).click();
   await page.waitForFunction(() => document.querySelectorAll('.dish-card').length === 0);
   // Generated speech text uses the same source editor and recipe importer as an article.
   const speechText = 'Tofu with tomatoes. Use 300 g tofu and 200 g tomatoes. Cook until hot.';
@@ -151,6 +126,6 @@ async function run() {
   assert.equal(await page.locator('#settings-form [name=english_model]').inputValue(),'llama3.2:1b');
   await page.getByRole('button',{name:'Close settings',exact:true}).click();
   assert.deepEqual(errors,[]);
-  console.log('PASS: recipe CRUD, calorie edits, food overrides, running toggle and filters, weekly priority persistence, flat ingredient editing, weekly plans, photo/camera UI, mobile layout, native-language transcript import and automatic language routing, AI progress beyond four minutes, and source preservation after a timeout; no browser errors.');
+  console.log('PASS: recipe CRUD, calorie edits, food overrides, saved running label and filters, weekly priority persistence, flat ingredient editing, weekly plans, mobile layout, native-language transcript import and automatic language routing, AI progress beyond four minutes, and source preservation after a timeout; no browser errors.');
 }
 run().catch(e => {console.error(e); process.exitCode=1;}).finally(async () => {await browser?.close(); server.kill(); await new Promise(r => server.once('exit',r)); assert.ok(path.resolve(folder).startsWith(path.join(os.tmpdir(),'meal-notebook-browser-'))); fs.rmSync(folder,{recursive:true,force:true});});

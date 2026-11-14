@@ -36,14 +36,14 @@ async function run(){
   let deleteRequests=0;page.on('request',request=>{if(request.url().endsWith('/api/recipes/delete'))deleteRequests++;});
   // Both Cancel and dismiss use the browser confirmation's non-accept path.
   for(let i=0;i<2;i++){
-    const notice=page.waitForEvent('dialog'),action=dish.getByRole('button',{name:'Delete',exact:true}).click(),dialog=await notice;
+    const notice=page.waitForEvent('dialog'),action=dish.getByRole('button',{name:'Delete recipe',exact:true}).click(),dialog=await notice;
     assert.equal(dialog.type(),'confirm');assert.match(dialog.message(),/Dish deleted/);assert.match(dialog.message(),/Weekly Meals/);
     assert.match(dialog.message(),/past, current, and upcoming/);
     assert.equal(deleteRequests,0);assert.deepEqual(await state(),before);
     await dialog.dismiss();await action;
     assert.deepEqual(await state(),before);assert.equal(await dish.count(),1);assert.equal(deleteRequests,0);
   }
-  const notice=page.waitForEvent('dialog'),action=dish.getByRole('button',{name:'Delete',exact:true}).click(),dialog=await notice;
+  const notice=page.waitForEvent('dialog'),action=dish.getByRole('button',{name:'Delete recipe',exact:true}).click(),dialog=await notice;
   assert.equal(deleteRequests,0);await dialog.accept();await action;await dish.waitFor({state:'hidden'});
   assert.equal(deleteRequests,1);
   const after=await state(),expected=structuredClone(before.plans);
@@ -58,7 +58,7 @@ async function run(){
     for(const item of deleted){
       const entry=card(item);assert.equal(await entry.count(),1);assert.equal(await entry.locator('strong').innerText(),'Dish deleted');
       assert.equal(await entry.locator('.meal-image').innerText(),'Dish deleted');assert.equal(await entry.locator('img,.meal-time,.meal-calories,.pill').count(),0);
-      assert.ok(await entry.locator('.meal-date').innerText());assert.equal(await entry.getByRole('button',{name:/Edit meal/}).count(),1);
+      assert.ok(await entry.locator('.meal-date').innerText());assert.equal(await entry.getByRole('button',{name:/Replace meal/}).count(),1);
     }
   }
   await checkCards();
@@ -72,7 +72,7 @@ async function run(){
   assert.deepEqual((await state()).plans,expected);await checkCards();
   await page.getByRole('tab',{name:/Dish List/}).click();assert.equal(await dish.count(),0);
   await page.getByRole('tab',{name:'Weekly Meals'}).click();
-  const chosen=deleted.find(item=>item.week==='2026-11-16');await card(chosen).getByRole('button',{name:/Edit meal/}).click();
+  const chosen=deleted.find(item=>item.week==='2026-11-16');await card(chosen).getByRole('button',{name:/Replace meal/}).click();
   const picker=page.locator('#replace-modal');assert.equal(await picker.locator('.replacement-choice').count(),1);
   await picker.getByRole('button',{name:/Keep this soup/}).click();await picker.getByRole('button',{name:'Replace',exact:true}).click();await picker.waitFor({state:'hidden'});
   assert.match(await card(chosen).innerText(),/Keep this soup/);assert.doesNotMatch(await card(chosen).innerText(),/Dish deleted/);

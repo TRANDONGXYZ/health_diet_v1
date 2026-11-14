@@ -57,11 +57,8 @@ def request(path, body, content_type='application/json'):
         ai._phase('idle')
 
 
-def chat(system, task, schema, image=None, max_tokens=3000):
-    content = task
-    if image:
-        content = [{'type':'text','text':task}, {'type':'image_url','image_url':{'url':'data:image/jpeg;base64,' + image}}]
-    payload = {'model':TEXT_MODEL, 'messages':[{'role':'system','content':system},{'role':'user','content':content}],
+def chat(system, task, schema, max_tokens=3000):
+    payload = {'model':TEXT_MODEL, 'messages':[{'role':'system','content':system},{'role':'user','content':task}],
                'temperature':0, 'reasoning_effort':'none', 'max_completion_tokens':min(max_tokens,4096),
                'response_format':{'type':'json_schema','json_schema':{'name':'recipe_result','strict':True,'schema':schema}}}
     response = request('/chat/completions', json.dumps(payload, ensure_ascii=False).encode())

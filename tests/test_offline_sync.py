@@ -53,6 +53,7 @@ class OfflineSyncTests(unittest.TestCase):
         for good in (None,1,3):backups.validate_settings({'household_servings':good})
         with patch('mealapp.hosted.enabled',return_value=True):
             sync.validate_operation(self.change('settings',{'household_servings':3}))
+            sync.validate_operation(self.change('settings',{'household_servings':3,'vision_model':'retired-model'}))
             with self.assertRaises(ValueError):sync.validate_operation(self.change('settings',{'household_servings':0}))
 
     def test_manual_save_never_looks_up_nutrition(self):

@@ -1,5 +1,4 @@
 """Bounded public web fetches and recipe/transcript extraction."""
-import concurrent.futures
 import html
 import ipaddress
 import json
@@ -217,79 +216,3 @@ def extract(url, kind="auto"):
     from . import hosted
     kind = ("audio transcript" if hosted.enabled() else "locally generated audio transcript") if source["method"] == "audio" else "video transcript" if is_video else "article"
     return {"text": text, "kind": kind, "method": source["method"], "url": url}
-
-
-TRUSTED = ("nhs.uk", "ods.od.nih.gov", "niddk.nih.gov", "fda.gov", "who.int", "myplate.gov", "foodsafety.gov")
-
-
-def trusted(url):
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    return any(host == domain or host.endswith("." + domain) for domain in TRUSTED)
-
-
-class SearchLinks(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag != "a":
-            return
-        link = dict(attrs).get("href", "")
-        if "uddg=" in link:
-            link = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query).get("uddg", [""])[0]
-        if link.startswith("http") and trusted(link) and link not in self.links:
-            self.links.append(link)
-
-
-def guidance_sources(food):
-    """Fetch current primary sources. Missing sources remain explicit, never fabricated."""
-    links = ["https://www.who.int/news-room/fact-sheets/detail/healthy-diet"]
-    # Known primary-source entry points keep common-food guidance useful when search is blocked.
-    # Their contents are still fetched live and must support any displayed claim.
-    words = set(re.findall(r"[a-z]+", food.lower()))
-    if words & {"broccoli", "spinach", "kale", "lettuce", "cabbage", "grapefruit", "cranberry"}:
-        links.append("https://www.nhs.uk/medicines/warfarin/")
-    if words & {"milk", "egg", "eggs", "peanut", "peanuts", "soy", "soya", "tofu", "chickpeas", "almonds", "cashews", "wheat", "shrimp", "fish", "salmon", "sesame"}:
-        links.append("https://www.nhs.uk/conditions/food-allergy/")
-    if words & {"fish", "salmon", "tuna", "shrimp", "tilapia", "mackerel", "sardines", "cod"}:
-        links.append("https://www.fda.gov/food/consumers/questions-answers-fdaepa-advice-about-eating-fish-those-who-might-become-or-are-pregnant-or")
-    warnings = []
-    try:
-        query = urllib.parse.quote_plus(food + " food daily portion precautions site:nhs.uk OR site:ods.od.nih.gov OR site:niddk.nih.gov OR site:fda.gov")
-        parser = SearchLinks()
-        parser.feed(fetch("https://html.duckduckgo.com/html/?q=" + query, timeout=15))
-        links.extend(parser.links[:2])
-        if not parser.links:
-            warnings.append("Online search returned no additional primary sources. Available reference pages are shown below.")
-    except Exception:
-        warnings.append("Online source search was unavailable. Available reference pages are shown below.")
-
-    def read(link):
-        try:
-            parser = Article()
-            parser.feed(fetch(link, timeout=15))
-            text = parser.text()
-            if len(text) < 300:
-                return None
-            # Select context around food and safety words rather than a page's navigation.
-            lines = text.splitlines()
-            food_words = [w for w in re.findall(r"[a-z]+", food.lower()) if w not in {"raw", "cooked", "fresh", "prepared", "food"}]
-            safety_words = ["daily", "portion", "avoid", "allerg", "pregnan", "kidney", "400", "salt"]
-            hits = [i for i, line in enumerate(lines) if any(re.search(r"\b" + re.escape(w) + r"\b", line.lower()) for w in food_words)]
-            hits += [i for i, line in enumerate(lines) if any(w in line.lower() for w in safety_words)]
-            relevant, used = [], set()
-            for i in hits:
-                for index in range(max(0, i - 1), min(len(lines), i + 3)):
-                    if index not in used:
-                        relevant.append(index)
-                        used.add(index)
-            excerpt = "\n".join(lines[i] for i in relevant)[:3000] or text[:3000]
-            return {"url": link, "text": excerpt}
-        except Exception:
-            return None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        sources = [result for result in pool.map(read, list(dict.fromkeys(links))[:4]) if result]
-    if not sources:
-        warnings.append("No guidance pages could be retrieved. Guidance is unavailable; try again with an internet connection.")
-    return sources, warnings

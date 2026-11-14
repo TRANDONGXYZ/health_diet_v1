@@ -162,10 +162,20 @@ class AdvanceAndBackupTests(unittest.TestCase):
         self.day=date(2026,11,11);plan_jobs.instant({'method':'rotation'})
         app.post('/api/plan/add',{'week_start':'2026-11-16'})
         app.post('/api/plan/replace',{'week_start':'2026-11-16','date':'2026-11-16','recipe_id':self.recipe['id']})
-        store.put('state','settings',{'text_model':'qwen2.5:1.5b','vision_model':'qwen3.5:0.8b','english_model':'llama3.2:1b','vietnamese_model':'qwen2.5:1.5b','usda_api_key':'backup-private-key'})
+        store.put('state','settings',{'text_model':'qwen2.5:1.5b','english_model':'llama3.2:1b','vietnamese_model':'qwen2.5:1.5b','usda_api_key':'backup-private-key'})
         store.put('cache','speech:test',{'text':'Nguồn tiếng Việt được lưu.'})
         backups.config_path().write_text(json.dumps({'context_size':4096,'speech_threads':2,'custom_option':'preserve-me'}),encoding='utf-8')
         return backups.export_zip()
+
+    def test_new_and_legacy_backup_settings_remain_compatible(self):
+        raw=self.prepare_backup()
+        manifest,_=backups.read_zip(raw)
+        self.assertNotIn('vision_model',manifest['settings'])
+        legacy=self.repack(raw,modify=lambda data:data['settings'].update({'vision_model':'retired-model'}))
+        restored,_=backups.read_zip(legacy)
+        self.assertEqual(restored['settings']['vision_model'],'retired-model')
+        backups.import_zip(legacy)
+        self.assertNotIn('vision_model',ai.config())
 
     def capture(self):
         with store.db() as connection:

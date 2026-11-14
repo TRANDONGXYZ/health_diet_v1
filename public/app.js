@@ -4,9 +4,9 @@ const $$ = (q, root = document) => [...root.querySelectorAll(q)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const normalize = v => String(v || '').toLowerCase().replace(/đ/g,'d').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\x00-\x7F]/g,'').trim().replace(/\s+/g,' ');
 const safeLink = v => { try { const u = new URL(v); return ['http:','https:'].includes(u.protocol) ? esc(u.href) : '#'; } catch { return '#'; } };
+const icon = name => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><use href="#icon-${name}"></use></svg>`;
 const fmt = n => Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
-let state = {recipes:[],foods:[],plan:null,settings:{}}, token = '', draft = null, photo = null, matches = [], busy = false, notifyTimer;
-let cameraStream = null;
+let state = {recipes:[],foods:[],plan:null,settings:{}}, token = '', draft = null, busy = false, notifyTimer;
 let activeTab='weekly',tabsReady=false,detailOrigin=null,editorOrigin=null,detailContext=null;
 try{if(localStorage.getItem('health-diet-active-tab')==='dishes')activeTab='dishes';}catch{/* Browser preferences may be disabled. */}
 const weekPreferences=new Map(), weekExpansion=new Map();
@@ -56,14 +56,14 @@ async function work(label, callback, {pollAI=true}={}) {
     } catch { /* Progress availability does not decide whether the main request succeeds. */ }
     finally { pollPending = false; }
   }, 2000):null;
-  $$('button[type=submit], [data-action=generate], [data-action=import], [data-action=identify]').forEach(b => b.disabled = true);
+  $$('button[type=submit], [data-action=generate], [data-action=import]').forEach(b => b.disabled = true);
   try {
     const operation=callback(scope);
     if(!scope.signal)return await operation;
     return await Promise.race([operation,new Promise((_,reject)=>scope.signal.addEventListener('abort',()=>reject(new DOMException('Dialog closed','AbortError')),{once:true}))]);
   }
   catch (error) { if(error.name==='AbortError'||scope.signal?.aborted)return; notify(error.message,true); if (dialog?.open) { progress.textContent = error.message; progress.classList.add('danger'); progress.dataset.persist = 'true'; } }
-  finally { polling = false; clearInterval(progressTimer); busy = false; $('#busy-indicator').hidden = true; if (!progress.dataset.persist) progress.remove(); $$('button[type=submit], [data-action=generate], [data-action=import], [data-action=identify]').forEach(b => b.disabled = b.dataset.action==='generate'); $('#identify-button').disabled = !photo; }
+  finally { polling = false; clearInterval(progressTimer); busy = false; $('#busy-indicator').hidden = true; if (!progress.dataset.persist) progress.remove(); $$('button[type=submit], [data-action=generate], [data-action=import]').forEach(b => b.disabled = b.dataset.action==='generate'); }
 }
 let pageScrollLock=null;
 const dialogOrigins=new WeakMap();
@@ -82,7 +82,7 @@ function finishDialogClose(dialog) {
   if(dialog.open)return;
   dialogSessions.get(dialog)?.abort();dialogSessions.delete(dialog);
   $$('[data-dialog-feedback]',dialog).forEach(node=>node.remove());
-  $$('#recipe-message,#dish-photo-message,#replace-message,#add-week-message,#backup-message,#identification',dialog).forEach(node=>node.textContent='');
+  $$('#recipe-message,#dish-photo-message,#replace-message,#add-week-message,#backup-message',dialog).forEach(node=>node.textContent='');
   if(dialog.id==='recipe-modal'){clearTimeout(languageTimer);sourceLanguageVersion++;resolving.clear();}
   if($('#notification').dataset.dialog===dialog.id){clearTimeout(notifyTimer);$('#notification').hidden=true;delete $('#notification').dataset.dialog;}
   for(const entry of dialogOrigins.get(dialog)||[]){if(entry.parent.open){entry.parent.scrollTop=entry.top;entry.parent.scrollLeft=entry.left;}}
@@ -114,7 +114,7 @@ function renderState(next){
   $('#storage-label').textContent='Saved on this device · Changes sync in the background · Export backups regularly';
   $('#ai-settings').hidden=!!state.hosted;
   if(state.hosted&&!$('#hosted-settings-info'))$('#settings-form').insertAdjacentHTML('beforebegin','<p id="hosted-settings-info" class="footnote">AI is provided by the beta operator through Groq. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.</p>');
-  if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';$('#photo-modal>.muted').textContent='Identify a food with hosted AI, confirm the name, then retrieve nutrition and guidance online. A photo cannot reveal exact ingredients or portion weight.';}
+  if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';}
   if(state.hosted)$('#import-box .import-content>p.footnote:last-of-type').textContent='Vietnamese and English stay in the source language. Source retrieval is temporarily disabled. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.';
 }
 const displayPhoto=url=>HealthLocal.photoURL(url);
@@ -132,7 +132,7 @@ async function checkStatus() {
     node.classList.toggle('ready',ready);
     const missing=[!status.vietnamese_ready && state.settings.vietnamese_model,!status.english_ready && state.settings.english_model].filter(Boolean);
     node.textContent=!status.connected?'Ollama is offline - open Settings':ready?'Local AI ready - Vietnamese + English':`Install ${missing.join(', ')} - Settings`;
-    $('#settings-status').textContent=`Ollama: ${status.connected?'connected':'offline'}. Vietnamese: ${status.vietnamese_ready?'installed':'not installed'}. English: ${status.english_ready?'installed':'not installed'}. Planning: ${status.text_ready?'installed':'not installed'}. Photo: ${status.vision_ready?'installed':'not installed'}.`;
+    $('#settings-status').textContent=`Ollama: ${status.connected?'connected':'offline'}. Vietnamese: ${status.vietnamese_ready?'installed':'not installed'}. English: ${status.english_ready?'installed':'not installed'}. Planning: ${status.text_ready?'installed':'not installed'}.`;
 
   } catch { if(!scope.signal?.aborted)node.textContent = 'AI status unavailable'; }
 }
@@ -160,7 +160,7 @@ function recipeMeta(r) { const c = calculate(r); return `${fmt(c.per_serving)} k
 function renderDishes() {
   const query = normalize($('#dish-search').value), filter = $('#vegan-filter').value, running = $('#running-filter').value;
   const recipes = state.recipes.filter(r => normalize(r.name).includes(query) && (filter === 'all' || filter === 'yes' && r.vegan === true || filter === 'no' && r.vegan === false || filter === 'unknown' && r.vegan == null) && (running === 'all' || running === 'yes' && r.good_for_running || running === 'no' && !r.good_for_running));
-  $('#dish-list').innerHTML = recipes.length ? recipes.map(r => `<article class="dish-card"><div class="dish-main"><h3><button data-action="details" data-id="${esc(r.id)}">${esc(r.name)}</button></h3><div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings ? esc(r.servings)+' servings' : 'Servings not stated'}</span></div><div class="dish-meta">${recipeMeta(r)}</div></div><div class="actions"><label class="check"><input type="checkbox" data-running-id="${esc(r.id)}" ${r.good_for_running ? 'checked' : ''}> Good for Running</label><button data-action="edit" data-id="${esc(r.id)}" class="secondary">Edit recipe</button><button data-action="delete" data-id="${esc(r.id)}" class="quiet danger">Delete</button></div></article>`).join('') : `<div class="empty"><div class="empty-icon" aria-hidden="true">＋</div><h3>${state.recipes.length ? 'No matching dishes' : 'A good week starts with a recipe.'}</h3><p>${state.recipes.length ? 'Try another search or vegan filter.' : 'Add your own dishes from a video, an article, or a recipe you already know. Your meal plan will only use these dishes.'}</p><button data-action="new">+ Create your first recipe</button></div>`;
+  $('#dish-list').innerHTML = recipes.length ? recipes.map(r => `<article class="dish-card"><div class="dish-main"><h3><button data-action="details" data-id="${esc(r.id)}">${esc(r.name)}</button></h3><div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings ? esc(r.servings)+' servings' : 'Servings not stated'}</span></div><div class="dish-meta">${recipeMeta(r)}</div></div><div class="actions"><button type="button" data-action="edit" data-id="${esc(r.id)}" class="secondary icon-button action-icon" aria-label="Edit recipe" title="Edit recipe">${icon('pencil')}</button><button type="button" data-action="delete" data-id="${esc(r.id)}" class="quiet danger icon-button action-icon" aria-label="Delete recipe" title="Delete recipe">${icon('trash')}</button></div></article>`).join('') : `<div class="empty"><div class="empty-icon" aria-hidden="true">＋</div><h3>${state.recipes.length ? 'No matching dishes' : 'A good week starts with a recipe.'}</h3><p>${state.recipes.length ? 'Try another search or vegan filter.' : 'Add your own dishes from a video, an article, or a recipe you already know. Your meal plan will only use these dishes.'}</p><button data-action="new">+ Create your first recipe</button></div>`;
 }
 function dateLabel(start, offset, options) { const d = new Date(start+'T12:00:00'); d.setDate(d.getDate()+offset); return d.toLocaleDateString('en-GB',options); }
 function weekRange(start) { return dateLabel(start,0,{day:'numeric',month:'short'})+' - '+dateLabel(start,6,{day:'numeric',month:'short',year:'numeric'}); }
@@ -169,7 +169,7 @@ function mealCard(day,index,plan,past) {
   if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
   const r=mealRecipe(day,past),frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id),c=day.deleted?null:frozen?r?.calories:calculate(r||{}),isToday=day.date===state.calendar.today;
   const image=day.deleted?'<span class="meal-placeholder" aria-hidden="true">Dish deleted</span>':r?.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="500" height="500" loading="lazy">`:'<span class="meal-placeholder" aria-hidden="true">No photo</span>';
-  return `<article class="meal-card${isToday?' is-today':''}" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}"><button class="meal-open" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" ${isToday?'aria-current="date"':''} aria-label="${esc(r?.name||'Unavailable dish')} - ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="meal-image">${image}</span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span>${day.deleted?'':`<span class="meal-time">${esc(timeLabel(r||{}))}</span>`}<strong>${esc(r?.name||'Dish unavailable')}</strong>${day.deleted?'':`<span class="meal-calories">${fmt(c?.per_serving)} kcal / serving${c&&!c.complete?' (partial)':''}</span>`}${r?.good_for_running?'<span class="pill">Good for Running</span>':''}</span></button><div class="meal-actions"><button data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" class="secondary" aria-label="Edit meal for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}">Edit</button></div></article>`;
+  return `<article class="meal-card${isToday?' is-today':''}" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}"><button class="meal-open" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" ${isToday?'aria-current="date"':''} aria-label="${esc(r?.name||'Unavailable dish')} - ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="meal-image">${image}</span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span>${day.deleted?'':`<span class="meal-time">${esc(timeLabel(r||{}))}</span>`}<strong>${esc(r?.name||'Dish unavailable')}</strong>${day.deleted?'':`<span class="meal-calories">${fmt(c?.per_serving)} kcal / serving${c&&!c.complete?' (partial)':''}</span>`}${r?.good_for_running?'<span class="pill">Good for Running</span>':''}</span></button><div class="meal-actions"><button data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" class="secondary icon-button action-icon" title="Replace meal" aria-label="Replace meal for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}">${icon('swap')}</button></div></article>`;
 }
 function offsetDate(start,offset){const d=new Date(start+'T12:00:00');d.setDate(d.getDate()+offset);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
 function availableWeeks(){return Array.from({length:8},(_,i)=>offsetDate(state.calendar.week_start,7*(i+1))).filter(week=>!(state.plans||[]).some(p=>p.week_start===week));}
@@ -184,7 +184,7 @@ function renderWeek() {
   $('#current-week-range').textContent='Current week: '+weekRange(calendar.week_start);
   $('#current-week-method').textContent=plan?({AI:'AI plan',rotation:'Simple Rotation',random:'Randomized',manual:'Manual plan'}[plan.method]||'Saved plan'):'No plan yet';
   $('#generate-plan').textContent='Generate with AI';
-  $('#delete-current-week').hidden=!plan;$('#delete-current-week').dataset.week=calendar.week_start;
+  $('#delete-current-week').setAttribute('aria-label','Delete week '+weekRange(calendar.week_start));$('#delete-current-week').hidden=!plan;$('#delete-current-week').dataset.week=calendar.week_start;
   $$('#weekly>.weekly-controls button,#plan-progress').forEach(node=>node.dataset.week=calendar.week_start);
   for(const [id,key] of [['plan-vegan','vegan_only'],['plan-running','prioritize_running']]){
     const input=$('#'+id);if(input.dataset.week!==calendar.week_start)input.checked=!!(weekPreferences.get(calendar.week_start)||plan||{})[key];input.dataset.week=calendar.week_start;input.dataset.pref=key;
@@ -192,9 +192,9 @@ function renderWeek() {
   $('#week-notice').textContent=plan?(plan.warnings||[]).join(' '):'New plans cover '+dateLabel(calendar.today,0,{weekday:'long',day:'numeric',month:'short'})+' through Sunday.';
   $('#week-grid').innerHTML=plan?plan.days.map((day,i)=>mealCard(day,i,plan,false)).join(''):`<div class="empty"><h3>Your remaining week, ready to plan.</h3><p>${state.recipes.length?'Choose a generation option above. Your plan will be saved automatically.':'Add a dish in Dish List to start planning.'}</p>${!state.recipes.length?'<button data-action="go-dishes">Go to Dish List</button>':''}</div>`;
   const future=(state.plans||[]).filter(p=>p.week_start>calendar.week_start).sort((a,b)=>a.week_start.localeCompare(b.week_start));
-  $('#future-weeks').innerHTML=future.length?'<h2 class="history-title">Upcoming weeks</h2>'+future.map(p=>`<details class="future-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${p.method==='manual'?'Plan ahead':esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger" aria-label="Delete week ${esc(weekRange(p.week_start))}">Delete</button></summary>${p.week_start<=calendar.advance_limit?weekControls(p):''}<div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,false)).join('')}</div></details>`).join(''):'';
+  $('#future-weeks').innerHTML=future.length?'<h2 class="history-title">Upcoming weeks</h2>'+future.map(p=>`<details class="future-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${p.method==='manual'?'Plan ahead':esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary>${p.week_start<=calendar.advance_limit?weekControls(p):''}<div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,false)).join('')}</div></details>`).join(''):'';
   const past=(state.plans||[]).filter(p=>p.week_start<calendar.week_start);
-  $('#plan-history').innerHTML=past.length?'<h2 class="history-title">Past weeks</h2>'+past.map(p=>`<details class="past-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':p.method==='manual'?'Manual plan':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger" aria-label="Delete week ${esc(weekRange(p.week_start))}">Delete</button></summary><div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,true)).join('')}</div></details>`).join(''):'';
+  $('#plan-history').innerHTML=past.length?'<h2 class="history-title">Past weeks</h2>'+past.map(p=>`<details class="past-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':p.method==='manual'?'Manual plan':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary><div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,true)).join('')}</div></details>`).join(''):'';
   $('#add-week').disabled=!availableWeeks().length;$('#add-week').title=availableWeeks().length?'Add one of the next eight weeks':'All eight upcoming weeks have been added.';
   setPlanBusy(!!planJobId||!!pendingPlanWeek);
 }
@@ -362,8 +362,8 @@ function openReplacement(week,index) {
   $('#replacement-details').hidden=false;$('#replacement-details').innerHTML='';$('#replace-modal').classList.add('expanded');$('#replace-confirm').disabled=true;
   renderReplacementList();
   const first=$('.replacement-choice',$('#replace-list'));
-  if(replacement.empty&&first)selectReplacement(first.dataset.id);
-  open('#replace-modal',replacement.empty&&first?'#replace-confirm':null);
+  if(first)selectReplacement(first.dataset.id);
+  open('#replace-modal',first?'#replace-confirm':null);
 }
 function renderReplacementList() {
   const query=normalize($('#replace-search').value),dishes=state.recipes.filter(r=>normalize(r.name).includes(query));
@@ -394,10 +394,11 @@ function refreshRecipeDialogs(){
   }
 }
 document.addEventListener('keydown',event=>{
-  if(event.key!=='/'||event.ctrlKey||event.metaKey||event.altKey||event.isComposing||!$('#replace-modal').open||$$('dialog[open]').at(-1)!==$('#replace-modal'))return;
-  const target=event.target;
+  if(event.key!=='/'||event.ctrlKey||event.metaKey||event.altKey||event.isComposing)return;
+  const dialog=$$('dialog[open]').at(-1),target=event.target;
   if(target.isContentEditable||target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))return;
-  event.preventDefault();$('#replace-search').focus({preventScroll:true});
+  const search=dialog=== $('#replace-modal')?'#replace-search':!dialog&&activeTab==='dishes'?'#dish-search':null;
+  if(search){event.preventDefault();$(search).focus({preventScroll:true});}
 });
 async function replaceMeal() {
   if(!replacement?.recipeId||weekMutationPending)return;weekMutationPending=true;$('#replace-confirm').disabled=true;
@@ -450,62 +451,6 @@ function editFood(id) {
   const food = state.foods.find(f => f.id === id); if (!food) return;
   const f = $('#food-form'); f.dataset.version=state.versions?.['foods/'+id]||0; f.dataset.original=JSON.stringify(food); ['id','name','kcal','note'].forEach(k => f.elements[k].value = food[k] ?? ''); f.elements.aliases.value = (food.aliases || []).join(', '); f.elements.name.focus();
 }
-async function loadPhoto(file) {
-  if (!file) return;
-  const scope=dialogScope($('#photo-modal'));
-  if (file.size > 20_000_000) { notify('Choose an image smaller than 20 MB.',true); return; }
-  try {
-    const bitmap = await createImageBitmap(file), canvas = document.createElement('canvas');
-    const scale = Math.min(1,448/Math.max(bitmap.width,bitmap.height)); canvas.width = Math.round(bitmap.width*scale); canvas.height = Math.round(bitmap.height*scale);
-    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height); bitmap.close();
-    scope.check();const data = canvas.toDataURL('image/jpeg',.82); photo = data.split(',')[1]; $('#photo-preview').src = data; $('#photo-preview').hidden = false; $('#identify-button').disabled = false;
-    $('#identification').textContent = 'Photo ready. Identify the food, then confirm or correct its name.';
-    $('#nutrition-results').innerHTML = ''; $('#nutrition-detail').innerHTML = ''; $('#nutrition-guidance').innerHTML = '';
-  } catch { if(!scope.signal?.aborted)notify('Could not read this photo. Use a JPEG, PNG, or WebP image.',true); }
-}
-function stopCamera() {
-  cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null;
-  $('#camera-feed').srcObject = null; $('#camera-area').hidden = true;
-}
-async function startCamera() {
-  const scope=dialogScope($('#photo-modal'));
-  stopCamera();
-  try {
-    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480}},audio:false});
-    if(scope.signal?.aborted){stream.getTracks().forEach(track=>track.stop());return;}cameraStream=stream;
-    $('#camera-feed').srcObject = cameraStream; $('#camera-area').hidden = false; await $('#camera-feed').play();
-  } catch { if(!scope.signal?.aborted){stopCamera(); $('#identification').textContent = 'Camera access is unavailable. Allow camera access in your browser, or upload a photo instead.';} }
-}
-async function captureCamera() {
-  const scope=dialogScope($('#photo-modal'));
-  const video = $('#camera-feed'); if (!video.videoWidth) return;
-  const canvas = document.createElement('canvas'); const scale = Math.min(1,448/Math.max(video.videoWidth,video.videoHeight));
-  canvas.width = Math.round(video.videoWidth*scale); canvas.height = Math.round(video.videoHeight*scale);
-  canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
-  const blob = await new Promise(resolve => canvas.toBlob(resolve,'image/jpeg',.82));
-  if(scope.signal?.aborted)return;stopCamera(); if (blob) await loadPhoto(blob);
-}
-async function nutritionSearch() {
-  const query = $('#nutrition-query').value.trim();
-  if (!query) { notify('Enter or confirm a food name first.',true); return; }
-  await work('Retrieving nutrition from USDA', async () => {
-    const result = await api('/api/nutrition/search',{query}); matches = result.matches;
-    $('#nutrition-detail').innerHTML = ''; $('#nutrition-guidance').innerHTML = '';
-    $('#nutrition-results').innerHTML = matches.length ? `<p class="muted">Choose the closest food and preparation state. All values are per 100 g.</p>${matches.map((m,i) => `<div class="nutrition-match"><span>${esc(m.name)}<br><small>${fmt(m.kcal)} kcal / 100 g</small></span><button class="secondary" data-action="choose-nutrition" data-index="${i}">Use this match</button></div>`).join('')}` : '<p>No USDA match found. Try another English name or a single ingredient.</p>';
-  });
-}
-async function chooseNutrition(index) {
-  const match = matches[index]; if (!match) return;
-  $('#nutrition-results').innerHTML = '';
-  const micronutrients = match.nutrients.filter(n => /vitamin|calcium|iron|magnesium|phosphorus|potassium|sodium|zinc|copper|manganese|selenium|thiamin|riboflavin|niacin|folate|choline/i.test(n.name));
-  $('#nutrition-detail').innerHTML = `<div class="panel"><h3>${esc(match.name)}</h3><p><strong>${fmt(match.kcal)} kcal / 100 g</strong> · <a href="${safeLink(match.source)}" target="_blank" rel="noopener noreferrer">USDA source ↗</a></p><p class="footnote">Reference food estimate; your photographed food may differ. Retrieved ${esc(new Date(match.retrieved_at).toLocaleDateString())}.</p><h3>Vitamins & minerals per 100 g</h3>${micronutrients.length ? `<div class="table-scroll"><table><thead><tr><th>Nutrient</th><th>Amount / 100 g</th></tr></thead><tbody>${micronutrients.map(n => `<tr><td>${esc(n.name)}</td><td>${esc(n.amount)} ${esc(n.unit)}</td></tr>`).join('')}</tbody></table></div>` : '<p>Micronutrient data was not available for this record.</p>'}</div>`;
-  $('#nutrition-guidance').innerHTML = '<p class="inline-message">Fetching primary-source guidance online…</p>';
-  await work('Reading online daily-amount and precaution guidance', async () => {
-    const data = await api('/api/nutrition/guidance',{query:$('#nutrition-query').value.trim()});
-    $('#nutrition-guidance').innerHTML = `<h3>Daily amounts & precautions</h3><p class="footnote">These quotations come from retrieved sources. General information, not a personal diet prescription. Food-group targets do not specify how much of this single food you should eat.</p>${data.items.map(item => `<div class="guidance-item"><span class="pill neutral">${esc(item.kind)}</span><blockquote>“${esc(item.quote)}”</blockquote><a href="${safeLink(item.url)}" target="_blank" rel="noopener noreferrer">Read full source and context ↗</a></div>`).join('')}${!data.items.some(i => i.kind === 'daily amount') ? '<p class="inline-message">No verified daily amount was found for this specific food.</p>' : ''}${!data.items.some(i => i.kind === 'precaution') ? '<p class="inline-message">Food-specific precautions could not be verified. This does not establish that the food is safe for everyone.</p>' : ''}${data.warnings.map(w => `<p class="inline-message">${esc(w)}</p>`).join('')}<details><summary>Retrieved online references</summary>${data.sources.map(s => `<div class="guidance-source"><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a><p>${esc(s.text.slice(0,600))}…</p></div>`).join('') || '<p>No sources could be retrieved.</p>'}</details>`;
-  });
-}
-
 document.addEventListener('click', async event => {
   const summary=event.target.closest('.week-summary');
   if(summary&&!event.target.closest('button')){
@@ -556,14 +501,7 @@ document.addEventListener('click', async event => {
   if (action === 'foods') { renderFoods(); open('#foods-modal'); }
   if (action === 'edit-food') editFood(id);
   if (action === 'clear-food') $('#food-form').reset();
-  if (action === 'photo') open('#photo-modal');
-  if (action === 'start-camera') await startCamera();
-  if (action === 'stop-camera') stopCamera();
-  if (action === 'capture-camera') await captureCamera();
-  if (action === 'identify') await work(state.hosted?'Identifying the food with hosted AI':'Identifying the food locally',async () => { const result = await api('/api/nutrition/identify',{image:photo}); $('#nutrition-query').value = result.name; $('#identification').textContent = `${result.name} · ${result.confidence} confidence. ${result.explanation}\nConfirm or correct the name below before looking it up.`; });
-  if (action === 'nutrition-search') await nutritionSearch();
-  if (action === 'choose-nutrition') await chooseNutrition(Number(button.dataset.index));
-  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = '';f.elements.household_servings.value=state.settings.household_servings??''; open('#settings-modal'); await checkStatus(); }
+  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = '';f.elements.household_servings.value=state.settings.household_servings??''; open('#settings-modal'); await checkStatus(); }
   if (action === 'export') await exportBackup();
 });
 $('#recipe-form').addEventListener('submit',async event => {
@@ -578,13 +516,6 @@ $('#recipe-form').addEventListener('submit',async event => {
 });
 $('#recipe-form').addEventListener('input',event=>{updateCalories();if(event.target.name==='source_text'){clearTimeout(languageTimer);languageTimer=setTimeout(showSourceLanguage,250);}});
 $('#recipe-form').addEventListener('change',event => { if (event.target.matches('.name-input')) resolveIngredient(event.target.value.trim()); });
-document.addEventListener('change',async event=>{
-  const input=event.target;
-  if(!input.matches('[data-running-id]')) return;
-  const value=input.checked;
-  try { await api('/api/recipes/running',{id:input.dataset.runningId,good_for_running:value,base:state.versions?.['recipes/'+input.dataset.runningId]||0,original:state.recipes.find(r=>r.id===input.dataset.runningId)});await refresh(); }
-  catch(error){input.checked=!value;notify(error.message,true);}
-});
 $('#food-form').addEventListener('submit',async event => {
   event.preventDefault(); const f = event.target;
   await work('Saving your food value',async (task) => { await api('/api/foods',{original:f.elements.id.value?JSON.parse(f.dataset.original||'null'):undefined,base:f.elements.id.value?Number(f.dataset.version||0):undefined,id:f.elements.id.value,name:f.elements.name.value,kcal:Number(f.elements.kcal.value),aliases:f.elements.aliases.value.split(',').map(s => s.trim()).filter(Boolean),note:f.elements.note.value}); await refresh();task.check(); renderFoods(); if ($('#recipe-modal').open) updateCalories(); f.reset(); notify('Food value saved. Recipe calories have been updated.'); },{pollAI:false});
@@ -595,8 +526,6 @@ $('#settings-form').addEventListener('submit',async event => {
 });
 $('#dish-search').addEventListener('input',renderDishes); $('#vegan-filter').addEventListener('change',renderDishes); $('#running-filter').addEventListener('change',renderDishes); $('#food-search').addEventListener('input',renderFoods);
 $('#dish-photo-upload').addEventListener('change',e=>uploadDishPhoto(e.target.files[0]));
-$('#photo-upload').addEventListener('change',e => loadPhoto(e.target.files[0])); $('#photo-camera').addEventListener('change',e => loadPhoto(e.target.files[0]));
-$('#photo-modal').addEventListener('close',stopCamera);
 $$('[role=tab]').forEach((button,index,buttons) => button.addEventListener('keydown',event => { if (['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); const next = buttons[(index+1)%buttons.length]; next.focus(); tab(next.dataset.tab); } }));
 $('#import-box .import-content').insertAdjacentHTML('beforeend','<label class="upload-label">Upload a transcript or audio/video file you are allowed to use<input id="transcript-upload" type="file" accept=".txt,.mp3,.mp4,.mpeg,.mpga,.m4a,.ogg,.wav,.webm,.flac"></label>');
 $('#transcript-upload').addEventListener('change',async event=>{

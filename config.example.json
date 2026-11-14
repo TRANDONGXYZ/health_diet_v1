@@ -1,6 +1,5 @@
 {
   "text_model": "qwen2.5:1.5b",
-  "vision_model": "qwen3.5:0.8b",
   "ollama_url": "http://127.0.0.1:11434",
   "usda_api_key": "DEMO_KEY",
   "language": "auto",

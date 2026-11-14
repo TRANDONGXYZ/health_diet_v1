@@ -110,7 +110,7 @@ async function run(){
   await page.reload();await page.locator('.past-week').first().waitFor();
   assert.match(await page.locator('.past-week .meal-card').first().innerText(),/Running tofu/);
   await page.getByRole('tab',{name:/Dish List/}).click();page.once('dialog',d=>d.accept());
-  await page.locator('.dish-card').filter({hasText:'Running tofu'}).getByRole('button',{name:'Delete',exact:true}).click();
+  await page.locator('.dish-card').filter({hasText:'Running tofu'}).getByRole('button',{name:'Delete recipe',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.dish-card').length===1);
   await page.getByRole('tab',{name:'Weekly Meals'}).click();await page.locator('.past-week .meal-open').first().click();
   assert.match(await page.locator('#dish-detail').innerText(),/Dish deleted/);assert.doesNotMatch(await page.locator('#dish-detail').innerText(),/Running tofu|Ingredients|kcal/);assert.equal(await page.locator('#dish-detail [data-action=edit]').count(),0);

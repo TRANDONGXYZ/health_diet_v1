@@ -12,7 +12,7 @@ async function run(){
   browser=await chromium.launch({channel:'msedge',headless:true});
   const page=await browser.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/api/state*',async route=>{const response=await route.fetch();const data=await response.json();data.hosted=true;await route.fulfill({response,json:data});});
-  await page.route('**/api/status',route=>route.fulfill({json:{provider:'groq',connected:true,text_ready:true,vision_ready:true,vietnamese_ready:true,english_ready:true}}));
+  await page.route('**/api/status',route=>route.fulfill({json:{provider:'groq',connected:true,text_ready:true,vietnamese_ready:true,english_ready:true}}));
   await page.goto(origin);await page.locator('#model-status').filter({hasText:'Groq'}).waitFor();
   assert.match(await page.locator('#storage-label').innerText(),/Private beta workspace/);
   await page.getByRole('button',{name:'Settings',exact:true}).click();

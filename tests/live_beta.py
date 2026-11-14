@@ -69,10 +69,7 @@ def check_url(origin,restart=False,ai=False):
             _,recipe=a('/api/import',{'text':text})
             assert recipe['recipe']['ingredients']
             assert recipe['recipe']['content_language']==('vi' if text.startswith('Đậu') else 'en')
-        # A plain image exercises the vision endpoint; it may correctly identify no food.
-        code,vision=a('/api/nutrition/identify',{'image':base64.b64encode(image).decode()},allow_error=True)
-        assert code==200 or code==400 and 'No food could be identified' in vision.get('error',''),vision
-    print('PASS: live isolated tester sessions, private images, recipes/plans, ZIP restore'+(', Render restart' if restart else '')+('. Real text/image AI requests sent.' if ai else '. No AI quota used.'))
+    print('PASS: live isolated tester sessions, private images, recipes/plans, ZIP restore'+(', Render restart' if restart else '')+('. Real text AI requests sent.' if ai else '. No AI quota used.'))
 
 
 def check_rls():

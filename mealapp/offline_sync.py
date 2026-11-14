@@ -90,7 +90,9 @@ def validate_operation(op):
             if type(value) is not bool: raise ValueError('Invalid collapse state.')
         elif key == 'settings':
             backups.validate_settings(value)
-            if hosted.enabled() and any(k not in ('language','text_model','vision_model','vietnamese_model','english_model','household_servings') for k in value):
+            # Older browsers may still have this retired setting queued. Accept
+            # its metadata without using it for inference or exposing an image API.
+            if hosted.enabled() and any(k not in ('language','text_model','vietnamese_model','english_model','household_servings','vision_model') for k in value):
                 raise ValueError('Hosted provider settings are managed by the beta operator.')
 
 
@@ -284,7 +286,7 @@ def online(route,data):
             compact.append({'id':row['id'][:100],'name':str(row['name'])[:200],'good_for_running':bool(row.get('good_for_running')),'vegan':row.get('vegan'),
                 'measured_minutes':row.get('minutes'),'ingredients':[{'name':str(n)[:100]} for n in row.get('ingredients',[])[:12]]})
         return plan_jobs.start(dict(data,client_only=True,client_recipes=compact))
-    allowed={'/extract','/source-language','/resolve','/nutrition/search','/nutrition/identify','/nutrition/guidance','/plan/cancel'}
+    allowed={'/extract','/source-language','/resolve','/plan/cancel'}
     if route not in allowed: raise ValueError('Unknown online feature.')
     from app import post
     return post('/api'+route,data)

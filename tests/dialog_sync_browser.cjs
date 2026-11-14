@@ -32,7 +32,7 @@ async function run(){
   }
   const transcript='Tofu, 100 g. Cook for five minutes.';await page.locator('#transcript-upload').setInputFiles({name:'recipe.txt',mimeType:'text/plain',buffer:Buffer.from(transcript)});await page.waitForFunction(text=>document.querySelector('[name=source_text]').value===text,transcript);
   await close('Cancel');
-  for(const id of ['photo-modal','foods-modal','settings-modal','add-week-modal','replace-modal']){
+  for(const id of ['foods-modal','settings-modal','add-week-modal','replace-modal']){
     await page.evaluate(async id=>{open('#'+id);await work('Test dialog feedback',async()=>{throw new Error('Dismissed feedback');},{pollAI:false});},id);
     await page.keyboard.press('Escape');await page.locator('#'+id).waitFor({state:'hidden'});await page.evaluate(id=>open('#'+id),id);assert.doesNotMatch(await page.locator('#'+id).innerText(),/Dismissed feedback/);await page.keyboard.press('Escape');await page.locator('#'+id).waitFor({state:'hidden'});
   }

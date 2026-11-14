@@ -164,7 +164,7 @@ class SourceExtractionTests(unittest.TestCase):
     def test_auto_language_overrides_stale_preferences_and_detection_needs_no_ai(self):
         with patch.object(ai,"get",return_value={"language":"Vietnamese"}):
             self.assertEqual(ai.config()["language"],"auto")
-        app.post("/api/settings",{"text_model":"qwen2.5:1.5b","vision_model":"qwen3.5:0.8b","vietnamese_model":"vi-custom","english_model":"en-custom"})
+        app.post("/api/settings",{"text_model":"qwen2.5:1.5b","vietnamese_model":"vi-custom","english_model":"en-custom"})
         with patch.object(ai,"ask",side_effect=AssertionError("Detection is not AI")):
             self.assertEqual(app.post("/api/source-language",{"text":"Use tofu and salt in the recipe."}),{"language":"en","model":"en-custom"})
             self.assertEqual(app.post("/api/source-language",{"text":"Cho đậu hũ vào chảo và nấu chín."}),{"language":"vi","model":"vi-custom"})

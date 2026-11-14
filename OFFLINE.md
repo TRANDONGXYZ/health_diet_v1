@@ -45,7 +45,7 @@ made no AI calls; Groq inference itself was not exercised by these checks.
 | Collapse/expand | One boolean for that week; current week always renders expanded |
 | Simple Rotation/Randomize | Runs in the browser; only generated slots and week metadata are queued; elapsed current-week dates stay unchanged |
 | Generate with AI | Sends up to 12 compact saved-dish candidates and target preferences; server returns suggestions; the browser commits the result to its outbox |
-| Recipe extraction/photo nutrition | Sends the source or photo needed for that operation; returned food references are saved locally; a failed lookup leaves an explicitly incomplete estimate |
+| Recipe extraction/ingredient lookup | Sends only the recipe source or food names needed; returned food references are saved locally; a failed lookup leaves an explicitly incomplete estimate |
 | Export Backup | Builds ZIP v1 from the current local view and photo Blobs, including edits still pending sync |
 | Import Backup | Confirmation, complete validation, then one local transaction installs the replacement and queues an explicit restore; image uploads are staged before the atomic server restore |
 
@@ -163,7 +163,7 @@ edits, deletion markers and elapsed-day preservation. The hosted test runs the
 real HTTP entrypoint against actual PostgreSQL RPCs with fixture authentication
 and private image storage; it checks isolation and persistence/receipts across
 an app-process restart. The existing general browser regression covers recipe
-CRUD, filters, calorie editing, nutrition/camera UI, native-language imports and
+CRUD, filters, calorie editing, native-language imports and
 AI error/progress handling. A deliberately aborted IndexedDB transaction retains
 the old records and form. Planning checks cover resuming/cancelling a task after
 reload and rejecting an AI result if that week changed while it was running.

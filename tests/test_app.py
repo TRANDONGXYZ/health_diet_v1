@@ -146,21 +146,6 @@ class AppTests(unittest.TestCase):
         self.assertIn("error", result[0])
         self.assertIsNone(store.find_food("new food"))
 
-    def test_guidance_rejects_unverifiable_quotes(self):
-        sources = [{"url": "https://www.who.int/test", "text": "A healthy diet includes a variety of foods."}]
-        fake = {"items": [{"kind": "daily amount", "text": "Eat 500 g tofu", "quote": "Eat 500 g tofu", "source_id": 1}]}
-        with patch.object(web, "guidance_sources", return_value=(sources, [])), patch.object(ai, "ask", return_value=fake):
-            result = nutrition.guidance("tofu")
-        self.assertEqual(result["items"], [])
-
-    def test_guidance_can_show_exact_source_precaution_when_model_is_unavailable(self):
-        quote = "Foods high in vitamin K, such as broccoli, spinach and other green leafy vegetables, can affect how warfarin works."
-        sources = [{"url":"https://www.nhs.uk/medicines/warfarin/","text":quote}]
-        with patch.object(web,"guidance_sources",return_value=(sources,[])), patch.object(ai,"ask",side_effect=ValueError("Offline")):
-            result = nutrition.guidance("broccoli raw")
-        self.assertEqual(result["items"][0]["quote"],quote)
-        self.assertEqual(result["items"][0]["kind"],"precaution")
-
     def test_data_persists_after_reinitialization(self):
         r = sample()
         store.put("recipes", r["id"], r)
@@ -199,6 +184,16 @@ class HTTPTests(unittest.TestCase):
         request = urllib.request.Request(self.url + "/api/recipes", data=json.dumps(sample()).encode(), headers={"Content-Type": "application/json", "X-App-Token": app.TOKEN})
         with urllib.request.urlopen(request) as response:
             self.assertEqual(json.load(response)["calories"]["total"], 678)
+
+    def test_retired_routes_cannot_invoke_ai(self):
+        with patch.object(ai,'ask',side_effect=AssertionError('Retired route invoked AI')) as ask:
+            for prefix in ('/api','/api/online'):
+                for name in ('identify','search','guidance'):
+                    request=urllib.request.Request(self.url+prefix+'/nutrition/'+name,data=b'{}',headers={'Content-Type':'application/json','X-App-Token':app.TOKEN})
+                    with self.subTest(prefix=prefix,name=name),self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request)
+                    self.assertIn(error.exception.code,(400,404));error.exception.close()
+            ask.assert_not_called()
 
     def test_csrf_and_external_origin_rejected(self):
         for headers in ({}, {"X-App-Token": app.TOKEN, "Origin": "https://evil.example"}):

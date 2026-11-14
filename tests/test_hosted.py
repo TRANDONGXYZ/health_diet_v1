@@ -318,14 +318,12 @@ class GroqAdapterTests(unittest.TestCase):
             self.assertEqual(command.call_args_list[1].args[0][0],'ffprobe')
             self.assertEqual(transcribe.call_args.args[0].suffix,'.flac')
 
-    def test_text_vision_and_audio_use_requested_models_and_native_language(self):
+    def test_text_and_audio_use_requested_models_and_native_language(self):
         result={'choices':[{'finish_reason':'stop','message':{'content':'{"name":"Đậu hũ"}'}}]}
         with patch.object(groq_ai,'request',return_value=result) as request:
             self.assertEqual(groq_ai.chat('Preserve Vietnamese','source',ai.obj({'name':ai.TEXT}))['name'],'Đậu hũ')
             payload=json.loads(request.call_args.args[1]);self.assertEqual(payload['model'],'qwen/qwen3.8-27b')
             self.assertEqual(payload['response_format']['json_schema']['strict'],True)
-            groq_ai.chat('Preserve English','source',ai.obj({'name':ai.TEXT}),image='abcd')
-            payload=json.loads(request.call_args.args[1]);self.assertEqual(payload['messages'][1]['content'][1]['type'],'image_url')
         import tempfile
         with tempfile.TemporaryDirectory() as folder,patch.object(groq_ai,'request',return_value={'text':'Đậu hũ'}) as request:
             file=Path(folder)/'audio.flac';file.write_bytes(b'audio')

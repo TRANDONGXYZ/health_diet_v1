@@ -184,6 +184,7 @@ def validate_recipe(recipe,foods):
 
 
 def validate_settings(settings):
+    # Version-1 backups may retain a retired vision_model value; it is optional metadata.
     if not isinstance(settings,dict):raise ValueError('Invalid backup settings.')
     for key,value in settings.items():
         if key=='household_servings' and value is not None and (type(value) is not int or not 1<=value<=9007199254740991):
@@ -276,7 +277,7 @@ def validate_data(data,images):
             weekly.week_date(week)
             if not isinstance(expanded,bool):raise ValueError('Invalid week expansion choice.')
     validate_settings(data['settings'])
-    if any(key not in data['settings'] for key in ('text_model','vision_model','vietnamese_model','english_model','ollama_url','usda_api_key')):raise ValueError('Missing backup settings.')
+    if any(key not in data['settings'] for key in ('text_model','vietnamese_model','english_model','ollama_url','usda_api_key')):raise ValueError('Missing backup settings.')
     if 'settings' in tables['state']:validate_settings(tables['state']['settings'])
     def check_photos(value):
         if isinstance(value,dict):

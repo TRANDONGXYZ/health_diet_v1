@@ -75,7 +75,7 @@ async function run(){
   await picker.getByRole('button',{name:/Updated short dish/}).click();await picker.getByRole('button',{name:'Replace',exact:true}).click();await picker.waitFor({state:'hidden'});
   assert.equal(await page.evaluate(()=>scrollY),beforeReplace);
   // The same height, internal overflow and scroll lock apply to every HTML dialog.
-  for(const id of ['recipe-modal','detail-modal','foods-modal','photo-modal','settings-modal','add-week-modal','replace-modal']){
+  for(const id of ['recipe-modal','detail-modal','foods-modal','settings-modal','add-week-modal','replace-modal']){
     const savedY=await page.evaluate(()=>scrollY);
     await page.evaluate(id=>open('#'+id),id);const modal=page.locator('#'+id),box=await modal.boundingBox();
     await modal.evaluate(el=>{const probe=document.createElement('div');probe.dataset.probe='yes';probe.style.height='2400px';el.append(probe);});
@@ -98,7 +98,7 @@ async function run(){
   const settings=page.locator('#settings-modal'),[download]=await Promise.all([page.waitForEvent('download'),settings.getByRole('button',{name:'Export Backup',exact:true}).click()]);
   const zipPath=path.join(folder,'states.zip');await download.saveAs(zipPath);await settings.getByRole('button',{name:'Close settings'}).click();
   await api('/api/recipes',{...short,name:'Changed after backup'});
-  await api('/api/settings',{text_model:'changed',vision_model:'qwen3.5:0.8b',vietnamese_model:'changed-vi',english_model:'changed-en',usda_api_key:'changed-key'});
+  await api('/api/settings',{text_model:'changed',vietnamese_model:'changed-vi',english_model:'changed-en',usda_api_key:'changed-key'});
   await api('/api/plan/expansion',{week_start:'2026-11-16',expanded:true});await api('/api/plan/expansion',{week_start:'2026-11-23',expanded:false});
   await page.reload();await page.locator('#week-grid .meal-card').first().waitFor();await page.getByRole('button',{name:'Settings',exact:true}).click();
   const images=()=>Object.fromEntries(fs.readdirSync(path.join(folder,'photos')).map(name=>[name,fs.readFileSync(path.join(folder,'photos',name)).toString('base64')]));

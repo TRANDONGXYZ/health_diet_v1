@@ -1,6 +1,5 @@
 """Run with python app.py. Core app uses only Python's standard library."""
 import argparse
-import base64
 import hashlib
 import json
 import logging
@@ -128,24 +127,6 @@ def post(route, data):
         if not isinstance(names, list) or len(names) > 30:
             raise ValueError("Resolve at most 30 ingredient names at a time.")
         return {"results": nutrition.resolve(names)}
-    if route == "/api/nutrition/search":
-        return {"matches": nutrition.search(text(data.get("query"), 180))}
-    if route == "/api/nutrition/identify":
-        encoded = data.get("image", "")
-        if not isinstance(encoded, str) or len(encoded) > 6_000_000:
-            raise ValueError("Use a smaller image (under 4 MB).")
-        try:
-            raw = base64.b64decode(encoded, validate=True)
-        except Exception:
-            raise ValueError("Invalid image data.") from None
-        if not (raw.startswith(b"\xff\xd8\xff") or raw.startswith(b"\x89PNG\r\n\x1a\n") or raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"):
-            raise ValueError("Use a JPEG, PNG, or WebP photo.")
-        return nutrition.identify(encoded)
-    if route == "/api/nutrition/guidance":
-        query = text(data.get("query"), 180)
-        if not query:
-            raise ValueError("Enter a food name first.")
-        return nutrition.guidance(query)
     if route == "/api/plan/generate":
         if data.get("method") in ("rotation", "random") or data.get("simple"):
             return plan_jobs.instant(data)
@@ -167,8 +148,8 @@ def post(route, data):
     if route == "/api/settings":
         if hosted.enabled():
             raise ValueError('Hosted AI models and provider keys are managed by the beta operator. Local model settings remain available in local mode.')
-        settings = {"text_model": text(data.get("text_model"), 150), "vision_model": text(data.get("vision_model"), 150), "language": "auto", "vietnamese_model": text(data.get("vietnamese_model") or ai.config()["vietnamese_model"], 150), "english_model": text(data.get("english_model") or ai.config()["english_model"], 150)}
-        if any(not settings[k] for k in ("text_model", "vision_model", "vietnamese_model", "english_model")):
+        settings = {"text_model": text(data.get("text_model"), 150), "language": "auto", "vietnamese_model": text(data.get("vietnamese_model") or ai.config()["vietnamese_model"], 150), "english_model": text(data.get("english_model") or ai.config()["english_model"], 150)}
+        if any(not settings[k] for k in ("text_model", "vietnamese_model", "english_model")):
             raise ValueError("Choose model names.")
         previous = store.get("state", "settings", {})
         settings["usda_api_key"] = text(data.get("usda_api_key"), 150) or previous.get("usda_api_key") or ai.config()["usda_api_key"]
@@ -229,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
                 settings = ai.config()
                 payload={"token": hosted.csrf() if hosted.enabled() else TOKEN, "hosted":hosted.enabled(), "recipes": [dict(r, calories=store.calories(r)) for r in recipes], "foods": store.all_items("foods"), "plan":next((p for p in plans if p["week_start"]==calendar["week_start"]),None),
                                    "plans":plans,"calendar":calendar,"plan_job":active_job,"week_expansion":store.get('state','week_expansion',{}),
-                                   "settings": {k: settings[k] for k in ("text_model", "vision_model", "vietnamese_model", "english_model", "language")}, "has_usda_key": settings["usda_api_key"] != "DEMO_KEY"}
+                                   "settings": {k: settings[k] for k in ("text_model", "vietnamese_model", "english_model", "language")}, "has_usda_key": settings["usda_api_key"] != "DEMO_KEY"}
             return self.reply(payload)
         if route == '/api/sync/session':
             return self.reply(offline_sync.profile(self))
