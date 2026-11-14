@@ -97,6 +97,7 @@ uses Git for Windows' OpenSSL for a temporary self-signed test certificate.
 ```powershell
 node tests/devices_sql.cjs
 node tests/devices_browser.cjs
+node tests/queued_edits_browser.cjs
 python -m unittest discover -s tests
 ```
 
@@ -110,9 +111,23 @@ offline reload, identical lost-ACK retries, retained conflicts, active/offline
 revocation and fresh rejoining. SQL tests also cover expired/reused tickets,
 unpaired direct access, read-only photo staging, and revoked direct Storage RLS.
 
-Live Supabase replication/Render and a physical iPhone must be checked after the
-migration and environment flag are enabled. No provider fixture proves actual
-Supabase publication configuration or an iPhone camera scan. On the live app use
+The browser tests await IndexedDB predicates explicitly and wait for actual
+upload acknowledgements before closing a device. The queued-edit regression
+also verifies three consecutive edits to one recipe with delayed responses.
+
+Live verification on `https://health-diet.onrender.com` passed on 2026-11-14:
+QR approval, separate persistent identities, private 500px image transfer and
+ZIP export, shared settings, offline save/reload/reconnect, and active revocation
+(data/photo reads return 403). One meal update reached the other browser in
+**1,286 ms** including upload; **35 seconds idle produced zero pulls**; returning
+after three acknowledged edits and closing the other page used **one catch-up**.
+Run `node tests/devices_live.cjs --url https://health-diet.onrender.com` to repeat
+using fresh isolated anonymous workspaces. It cleans up its test recipes/plans.
+Measurements are written to ignored `test-results/devices-live.json`.
+
+These checks use independent Chromium browser contexts (one with an iPhone
+user agent), with visibility transitions driven programmatically. A physical
+iPhone camera scan and Safari/WebKit are not verified. On the live app use
 two independent browsers; DevTools Network should show one `/api/sync/events`
 stream per visible tab, small `/pull?since=…` responses on changes/visibility,
 and no timed pulls while idle. Hide the first browser, save three changes on

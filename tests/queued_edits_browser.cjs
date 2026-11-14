@@ -1,0 +1,11 @@
+// Repeated local saves of one record while acknowledgements are delayed.
+const {start,wait}=require('./devices_fixture.cjs'),{chromium}=require('playwright'),assert=require('node:assert/strict');
+let fixture,browser;
+async function waitAsync(page,predicate,arg,options={}){const until=Date.now()+(options.timeout||30000);while(Date.now()<until){if(await page.evaluate(predicate,arg))return;await wait(100);}throw new Error('Timed out awaiting async browser condition.');}
+
+async function main(){fixture=await start();browser=await chromium.launch({channel:'msedge',headless:true,args:['--ignore-certificate-errors']});const context=await browser.newContext({ignoreHTTPSErrors:true}),page=await context.newPage();await page.goto(fixture.origin);await page.waitForFunction(()=>state?.calendar);await page.getByRole('tab',{name:/Dish List/}).click();await page.getByRole('button',{name:'+ Create recipe',exact:true}).click();await page.locator('#recipe-form [name=name]').fill('Repeated save');await page.locator('#save-recipe').click();await page.locator('#recipe-modal').waitFor({state:'hidden'});await waitAsync(page,async()=>!(await HealthLocal.read()).ops.length);const id=await page.evaluate(()=>state.recipes[0].id),sent=[];
+ await page.route('**/api/sync/push',async route=>{sent.push(route.request().postDataJSON());const response=await route.fetch();await wait(1000);await route.fulfill({response});});
+ for(let i=0;i<3;i++)await page.evaluate(async({id,i})=>{await api('/api/recipes',{...state.recipes.find(r=>r.id===id),notes:'Save '+i});},{id,i});
+ await waitAsync(page,async()=>!(await HealthLocal.read()).ops.length,null,{timeout:30000});const result=await page.evaluate(async id=>{const s=await HealthLocal.request('/api/sync/pull?since=0');return {local:state.recipes.find(r=>r.id===id).notes,remote:s.changes.find(r=>r.key==='recipes/'+id).value.notes};},id);assert.equal(result.local,'Save 2',JSON.stringify(sent));assert.equal(result.remote,'Save 2',JSON.stringify(sent));assert.equal(new Set(sent.map(o=>o.id)).size,3);console.log('PASS three queued edits to one recipe retain the final value with delayed acknowledgements.');
+}
+main().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{await browser?.close();await fixture?.close();});
