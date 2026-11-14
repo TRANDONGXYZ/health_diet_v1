@@ -8,6 +8,8 @@ Manual changes now save in the browser first and sync in the background. Once lo
 
 **Device pairing:** Share a workspace with another browser through Settings → Connected devices, using a single-use QR and approval on the first device. Visible tabs receive live change notifications; hidden tabs catch up when reopened. See [DEVICES.md](DEVICES.md) for the new `supabase/devices.sql` migration, `DEVICE_PAIRING_ENABLED=1` rollout, device revocation and regression tests. Existing offline saves and ZIP backups remain supported.
 
+**Idle flicker fix:** Removed the one-minute card rebuild and retained unchanged cards/images during sync. See [FLICKER.md](FLICKER.md) for before/after traces, regression commands, and physical iPhone Safari verification steps. No database migration or environment change is required.
+
 ## Start on Windows 11
 
 1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/). Select **Add Python to PATH**. Python 3.15 is also supported by the core app and the installed caption dependencies.

@@ -285,5 +285,5 @@ const HealthLocal = (() => {
     tx.objectStore('meta').put({id:'error',value:''});
   });schedule();}
   channel?.addEventListener('message',()=>{publish();schedule();});window.addEventListener('online',()=>{sessionAt=0;recoverPairing().then(()=>{schedule();publish();connectLive();});});window.addEventListener('offline',()=>{closeLive();publish();});document.addEventListener('visibilitychange',()=>{if(document.hidden){catchRequested=false;closeLive();}else connectLive();});
-  return {init,read,view,entities,catchup,joinPairing,cancelPairing,connectLive,watchPairing,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,displayAmount,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
+  return {sameContent:equal,init,read,view,entities,catchup,joinPairing,cancelPairing,connectLive,watchPairing,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,displayAmount,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
 })();

@@ -7,3 +7,4 @@ config.local.json
 .env
 .env.*
 .tools/sql-check/
+.tools/playwright-browsers/

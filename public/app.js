@@ -104,18 +104,56 @@ tab(activeTab,false);
 async function refresh() {
   renderState(HealthLocal.view(await HealthLocal.read()));
 }
+// Saved records and their versions still reach state on every acknowledgement.
+// Only changed view content needs DOM work; unchanged images keep their nodes.
+let renderedContent=null;
+function patchText(target,value){const text=String(value);if(target.textContent!==text)target.textContent=text;}
+function patchMarkup(target,html){
+  const template=document.createElement('template');template.innerHTML=html;
+  const key=node=>node.nodeType===1?(node.id?'id:'+node.id:node.classList.contains('meal-card')?'meal:'+node.dataset.week+'/'+node.dataset.date:node.classList.contains('dish-card')?'dish:'+node.dataset.recipeId:node.matches('details[data-week]')?'week:'+node.dataset.week:node.matches('.replacement-choice[data-id]')?'choice:'+node.dataset.id:null):null;
+  function children(parent,next){
+    const old=[...parent.childNodes],keyed=new Map(old.map(n=>[key(n),n]).filter(([k])=>k)),used=new Set();let position=parent.firstChild;
+    for(const wanted of [...next.childNodes]){
+      const wantedKey=key(wanted);
+      let current=wantedKey?keyed.get(wantedKey):position&&!used.has(position)&&!key(position)&&position.nodeType===wanted.nodeType&&position.nodeName===wanted.nodeName?position:null;
+      if(current&&(used.has(current)||current.nodeType!==wanted.nodeType||current.nodeName!==wanted.nodeName))current=null;
+      if(!current){current=wanted.cloneNode(true);parent.insertBefore(current,position);}
+      else{
+        if(current!==position)parent.insertBefore(current,position);
+        if(!current.isEqualNode(wanted)){
+          if(current.nodeType===Node.TEXT_NODE||current.nodeType===Node.COMMENT_NODE)current.nodeValue=wanted.nodeValue;
+          else{
+            // Source-evidence disclosure is local reading state. Week disclosure
+            // is controlled by its saved expansion value and must still update.
+            for(const a of [...current.attributes])if(!wanted.hasAttribute(a.name)&&!(a.name==='open'&&current.matches('details:not([data-week])')))current.removeAttribute(a.name);
+            for(const a of [...wanted.attributes])if(current.getAttribute(a.name)!==a.value)current.setAttribute(a.name,a.value);
+            if(current.matches('input[type=checkbox],input[type=radio]')&&current.checked!==wanted.checked)current.checked=wanted.checked;
+            children(current,wanted);
+          }
+        }
+      }
+      used.add(current);position=current.nextSibling;
+    }
+    for(const node of old)if(!used.has(node))node.remove();
+  }
+  children(target,template.content);
+}
 function renderState(next){
   state=next;token=state.token;
-  $('#dish-count').textContent = state.recipes.length; $('#food-count').textContent = `${state.foods.length} food references`;
-  $('#food-options').innerHTML = state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join('');
+  const images=[...state.recipes.map(r=>displayPhoto(r.photo_url)),...(state.plans||[]).flatMap(p=>p.days.map(d=>displayPhoto(d.recipe?.photo_url)))];
+  const content=[state.recipes,state.foods,state.plans,state.calendar,state.week_expansion,state.settings,state.plan_job,state.hosted,images];
+  if(HealthLocal.sameContent(content,renderedContent))return;
+  renderedContent=content;
+  patchText($('#dish-count'),state.recipes.length); patchText($('#food-count'),`${state.foods.length} food references`);
+  patchMarkup($('#food-options'), state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join(''));
   renderDishes(); renderWeek();
   refreshRecipeDialogs();
   tabsReady=true;tab(activeTab,false);
-  $('#storage-label').textContent='Saved on this device · Changes sync in the background · Export backups regularly';
+  patchText($('#storage-label'),'Saved on this device · Changes sync in the background · Export backups regularly');
   $('#ai-settings').hidden=!!state.hosted;
   if(state.hosted&&!$('#hosted-settings-info'))$('#settings-form').insertAdjacentHTML('beforebegin','<p id="hosted-settings-info" class="footnote">AI is provided by the beta operator through Groq. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.</p>');
-  if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';}
-  if(state.hosted)$('#import-box .import-content>p.footnote:last-of-type').textContent='Vietnamese and English stay in the source language. Source retrieval is temporarily disabled. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.';
+  if(state.hosted){patchText($('#busy-indicator small'),'Hosted AI may be limited during the public beta.');}
+  if(state.hosted)patchText($('#import-box .import-content>p.footnote:last-of-type'),'Vietnamese and English stay in the source language. Source retrieval is temporarily disabled. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.');
 }
 const displayPhoto=url=>HealthLocal.photoURL(url);
 async function checkStatus() {
@@ -160,16 +198,16 @@ function recipeMeta(r) { const c = calculate(r); return `${fmt(c.per_serving)} k
 function renderDishes() {
   const query = normalize($('#dish-search').value), filter = $('#vegan-filter').value, running = $('#running-filter').value;
   const recipes = state.recipes.filter(r => normalize(r.name).includes(query) && (filter === 'all' || filter === 'yes' && r.vegan === true || filter === 'no' && r.vegan === false || filter === 'unknown' && r.vegan == null) && (running === 'all' || running === 'yes' && r.good_for_running || running === 'no' && !r.good_for_running));
-  $('#dish-list').innerHTML = recipes.length ? recipes.map(r => `<article class="dish-card"><div class="dish-main"><h3><button data-action="details" data-id="${esc(r.id)}">${esc(r.name)}</button></h3><div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings ? esc(r.servings)+' servings' : 'Servings not stated'}</span></div><div class="dish-meta">${recipeMeta(r)}</div></div><div class="actions"><button type="button" data-action="edit" data-id="${esc(r.id)}" class="secondary icon-button action-icon" aria-label="Edit recipe" title="Edit recipe">${icon('pencil')}</button><button type="button" data-action="delete" data-id="${esc(r.id)}" class="quiet danger icon-button action-icon" aria-label="Delete recipe" title="Delete recipe">${icon('trash')}</button></div></article>`).join('') : `<div class="empty"><div class="empty-icon" aria-hidden="true">＋</div><h3>${state.recipes.length ? 'No matching dishes' : 'A good week starts with a recipe.'}</h3><p>${state.recipes.length ? 'Try another search or vegan filter.' : 'Add your own dishes from a video, an article, or a recipe you already know. Your meal plan will only use these dishes.'}</p><button data-action="new">+ Create your first recipe</button></div>`;
+  patchMarkup($('#dish-list'), recipes.length ? recipes.map(r => `<article class="dish-card" data-recipe-id="${esc(r.id)}"><div class="dish-main"><h3><button data-action="details" data-id="${esc(r.id)}">${esc(r.name)}</button></h3><div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings ? esc(r.servings)+' servings' : 'Servings not stated'}</span></div><div class="dish-meta">${recipeMeta(r)}</div></div><div class="actions"><button type="button" data-action="edit" data-id="${esc(r.id)}" class="secondary icon-button action-icon" aria-label="Edit recipe" title="Edit recipe">${icon('pencil')}</button><button type="button" data-action="delete" data-id="${esc(r.id)}" class="quiet danger icon-button action-icon" aria-label="Delete recipe" title="Delete recipe">${icon('trash')}</button></div></article>`).join('') : `<div class="empty"><div class="empty-icon" aria-hidden="true">＋</div><h3>${state.recipes.length ? 'No matching dishes' : 'A good week starts with a recipe.'}</h3><p>${state.recipes.length ? 'Try another search or vegan filter.' : 'Add your own dishes from a video, an article, or a recipe you already know. Your meal plan will only use these dishes.'}</p><button data-action="new">+ Create your first recipe</button></div>`);
 }
 function dateLabel(start, offset, options) { const d = new Date(start+'T12:00:00'); d.setDate(d.getDate()+offset); return d.toLocaleDateString('en-GB',options); }
 function weekRange(start) { return dateLabel(start,0,{day:'numeric',month:'short'})+' - '+dateLabel(start,6,{day:'numeric',month:'short',year:'numeric'}); }
 function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};const original=(state.recipes.find(r=>r.id===day.recipe_id)||day.recipe)||{id:day.recipe_id,name:'Dish unavailable',ingredients:[],notes:'The original recipe was removed before this plan was archived.',calories:{total:null,per_serving:null,complete:false,missing:['Recipe details unavailable']}};return HealthLocal.plannedRecipe(original,day.serving_plan); }
 function mealCard(day,index,plan,past) {
-  if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
+  if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" data-date="${esc(day.date)}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
   const r=mealRecipe(day,past),frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id),c=day.deleted?null:frozen?r?.calories:calculate(r||{}),isToday=day.date===state.calendar.today;
   const image=day.deleted?'<span class="meal-placeholder" aria-hidden="true">Dish deleted</span>':r?.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="500" height="500" loading="lazy">`:'<span class="meal-placeholder" aria-hidden="true">No photo</span>';
-  return `<article class="meal-card${isToday?' is-today':''}" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}"><button class="meal-open" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" ${isToday?'aria-current="date"':''} aria-label="${esc(r?.name||'Unavailable dish')} - ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="meal-image">${image}</span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span>${day.deleted?'':`<span class="meal-time">${esc(timeLabel(r||{}))}</span>`}<strong>${esc(r?.name||'Dish unavailable')}</strong>${day.deleted?'':`<span class="meal-calories">${fmt(c?.per_serving)} kcal / serving${c&&!c.complete?' (partial)':''}</span>`}${r?.good_for_running?'<span class="pill">Good for Running</span>':''}</span></button><div class="meal-actions"><button data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" class="secondary icon-button action-icon" title="Replace meal" aria-label="Replace meal for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}">${icon('swap')}</button></div></article>`;
+  return `<article class="meal-card${isToday?' is-today':''}" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" data-date="${esc(day.date)}"><button class="meal-open" data-action="meal-details" data-week="${esc(plan.week_start)}" data-day="${index}" ${isToday?'aria-current="date"':''} aria-label="${esc(r?.name||'Unavailable dish')} - ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="meal-image">${image}</span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span>${day.deleted?'':`<span class="meal-time">${esc(timeLabel(r||{}))}</span>`}<strong>${esc(r?.name||'Dish unavailable')}</strong>${day.deleted?'':`<span class="meal-calories">${fmt(c?.per_serving)} kcal / serving${c&&!c.complete?' (partial)':''}</span>`}${r?.good_for_running?'<span class="pill">Good for Running</span>':''}</span></button><div class="meal-actions"><button data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" class="secondary icon-button action-icon" title="Replace meal" aria-label="Replace meal for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}">${icon('swap')}</button></div></article>`;
 }
 function offsetDate(start,offset){const d=new Date(start+'T12:00:00');d.setDate(d.getDate()+offset);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
 function availableWeeks(){return Array.from({length:8},(_,i)=>offsetDate(state.calendar.week_start,7*(i+1))).filter(week=>!(state.plans||[]).some(p=>p.week_start===week));}
@@ -181,20 +219,20 @@ function weekIsExpanded(week){return week===state.calendar.week_start?true:(stat
 function renderWeek() {
   if(!state.calendar)return;
   const plan=state.plan,calendar=state.calendar;
-  $('#current-week-range').textContent='Current week: '+weekRange(calendar.week_start);
-  $('#current-week-method').textContent=plan?({AI:'AI plan',rotation:'Simple Rotation',random:'Randomized',manual:'Manual plan'}[plan.method]||'Saved plan'):'No plan yet';
-  $('#generate-plan').textContent='Generate with AI';
+  patchText($('#current-week-range'),'Current week: '+weekRange(calendar.week_start));
+  patchText($('#current-week-method'),plan?({AI:'AI plan',rotation:'Simple Rotation',random:'Randomized',manual:'Manual plan'}[plan.method]||'Saved plan'):'No plan yet');
+  patchText($('#generate-plan'),'Generate with AI');
   $('#delete-current-week').setAttribute('aria-label','Delete week '+weekRange(calendar.week_start));$('#delete-current-week').hidden=!plan;$('#delete-current-week').dataset.week=calendar.week_start;
   $$('#weekly>.weekly-controls button,#plan-progress').forEach(node=>node.dataset.week=calendar.week_start);
   for(const [id,key] of [['plan-vegan','vegan_only'],['plan-running','prioritize_running']]){
     const input=$('#'+id);if(input.dataset.week!==calendar.week_start)input.checked=!!(weekPreferences.get(calendar.week_start)||plan||{})[key];input.dataset.week=calendar.week_start;input.dataset.pref=key;
   }
-  $('#week-notice').textContent=plan?(plan.warnings||[]).join(' '):'New plans cover '+dateLabel(calendar.today,0,{weekday:'long',day:'numeric',month:'short'})+' through Sunday.';
-  $('#week-grid').innerHTML=plan?plan.days.map((day,i)=>mealCard(day,i,plan,false)).join(''):`<div class="empty"><h3>Your remaining week, ready to plan.</h3><p>${state.recipes.length?'Choose a generation option above. Your plan will be saved automatically.':'Add a dish in Dish List to start planning.'}</p>${!state.recipes.length?'<button data-action="go-dishes">Go to Dish List</button>':''}</div>`;
+  patchText($('#week-notice'),plan?(plan.warnings||[]).join(' '):'New plans cover '+dateLabel(calendar.today,0,{weekday:'long',day:'numeric',month:'short'})+' through Sunday.');
+  patchMarkup($('#week-grid'), plan?plan.days.map((day,i)=>mealCard(day,i,plan,false)).join(''):`<div class="empty"><h3>Your remaining week, ready to plan.</h3><p>${state.recipes.length?'Choose a generation option above. Your plan will be saved automatically.':'Add a dish in Dish List to start planning.'}</p>${!state.recipes.length?'<button data-action="go-dishes">Go to Dish List</button>':''}</div>`);
   const future=(state.plans||[]).filter(p=>p.week_start>calendar.week_start).sort((a,b)=>a.week_start.localeCompare(b.week_start));
-  $('#future-weeks').innerHTML=future.length?'<h2 class="history-title">Upcoming weeks</h2>'+future.map(p=>`<details class="future-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${p.method==='manual'?'Plan ahead':esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary>${p.week_start<=calendar.advance_limit?weekControls(p):''}<div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,false)).join('')}</div></details>`).join(''):'';
+  patchMarkup($('#future-weeks'), future.length?'<h2 class="history-title">Upcoming weeks</h2>'+future.map(p=>`<details class="future-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${p.method==='manual'?'Plan ahead':esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary>${p.week_start<=calendar.advance_limit?weekControls(p):''}<div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,false)).join('')}</div></details>`).join(''):'');
   const past=(state.plans||[]).filter(p=>p.week_start<calendar.week_start);
-  $('#plan-history').innerHTML=past.length?'<h2 class="history-title">Past weeks</h2>'+past.map(p=>`<details class="past-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':p.method==='manual'?'Manual plan':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary><div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,true)).join('')}</div></details>`).join(''):'';
+  patchMarkup($('#plan-history'), past.length?'<h2 class="history-title">Past weeks</h2>'+past.map(p=>`<details class="past-week" data-week="${esc(p.week_start)}" ${weekIsExpanded(p.week_start)?'open':''}><summary class="week-summary"><span class="past-arrow" aria-hidden="true">&#9656;</span><div class="grow"><h3>${weekRange(p.week_start)}</h3><p class="muted">${esc(p.method==='AI'?'AI plan':p.method==='random'?'Randomized':p.method==='manual'?'Manual plan':'Simple Rotation')}</p></div><button data-action="delete-week" data-week="${esc(p.week_start)}" class="quiet danger icon-button action-icon" aria-label="Delete week ${esc(weekRange(p.week_start))}" title="Delete week">${icon('trash')}</button></summary><div class="meal-grid">${p.days.map((day,i)=>mealCard(day,i,p,true)).join('')}</div></details>`).join(''):'');
   $('#add-week').disabled=!availableWeeks().length;$('#add-week').title=availableWeeks().length?'Add one of the next eight weeks':'All eight upcoming weeks have been added.';
   setPlanBusy(!!planJobId||!!pendingPlanWeek);
 }
@@ -215,12 +253,12 @@ async function createWeek(){
 function showMeal(week,index,rememberOrigin=true) {
   const plan=(state.plans||[]).find(p=>p.week_start===week);const day=plan?.days[index];if(!day)return;
   if(rememberOrigin)detailOrigin=editorLocation(week,index);detailContext={week,date:day.date};
-  if(day.deleted){detailEdit(null);$('#dish-detail').innerHTML=`<article class="recipe-detail"><h2>Dish deleted</h2><p class="dish-meta">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</p></article>`;open('#detail-modal');return;}
+  if(day.deleted){detailEdit(null);patchMarkup($('#dish-detail'),`<article class="recipe-detail"><h2>Dish deleted</h2><p class="dish-meta">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</p></article>`);open('#detail-modal');return;}
   const past=week<state.calendar.week_start,r=mealRecipe(day,past);if(!r){notify('This dish is unavailable.',true);return;}
   const linked=state.recipes.find(item=>item.id===day.recipe_id),frozen=past||day.date<state.calendar.today||!linked;detailEdit(linked?.id);
   const portion=day.serving_plan,servings=portion?`<p class="footnote" id="meal-servings">${portion.servings?'Planned meal: '+portion.servings+' servings':'Planned servings not set'} · ${portion.recipe_servings?'Original recipe: '+portion.recipe_servings+' servings':'Original recipe yield not stated'}.${!portion.servings||!portion.recipe_servings?' Quantities kept as written in the original recipe.':''}</p>`:'';
   const scaled=!!(portion?.servings&&portion.recipe_servings);
-  $('#dish-detail').innerHTML=servings+detailsMarkup(r,frozen,scaled)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`;
+  patchMarkup($('#dish-detail'),servings+detailsMarkup(r,frozen,scaled)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`);
   open('#detail-modal');
 }
 function runningPill(recipe) { return recipe.good_for_running ? '<span class="pill">Good for Running</span>' : ''; }
@@ -294,7 +332,7 @@ function detailsMarkup(r, frozen=false,scaled=false) {
   return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2></div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(displayPhoto(r.photo_url))}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(scaled?HealthLocal.scaleQuantity(item.quantity||'',1,true):item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${scaled?HealthLocal.displayAmount(item.grams):item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
 }
 function detailEdit(id){const button=$('#detail-edit');button.hidden=!id;button.dataset.id=id||'';}
-function showDetails(id,rememberOrigin=true) { const r = state.recipes.find(r => r.id === id); if (!r) return; if(rememberOrigin)detailOrigin=editorLocation();detailContext={id};$('#dish-detail').innerHTML = detailsMarkup(r); detailEdit(r.id);open('#detail-modal'); }
+function showDetails(id,rememberOrigin=true) { const r = state.recipes.find(r => r.id === id); if (!r) return; if(rememberOrigin)detailOrigin=editorLocation();detailContext={id};patchMarkup($('#dish-detail'),detailsMarkup(r)); detailEdit(r.id);open('#detail-modal'); }
 let planJobId=null,planJobWeek=null,pendingPlanWeek=null,planPollTimer=null, planPollPending=false, requestedPlanCancel=false;
 function jobWeek(){return planJobWeek||pendingPlanWeek||state.calendar?.week_start;}
 function planProgress(message){$$('[data-plan-progress]').forEach(node=>{if(node.dataset.week===jobWeek())node.textContent=message;});}
@@ -367,12 +405,12 @@ function openReplacement(week,index) {
 }
 function renderReplacementList() {
   const query=normalize($('#replace-search').value),dishes=state.recipes.filter(r=>normalize(r.name).includes(query));
-  $('#replace-list').innerHTML=dishes.map(r=>`<button class="replacement-choice${replacement?.recipeId===r.id?' selected':''}" data-action="choose-replacement" data-id="${esc(r.id)}" aria-pressed="${replacement?.recipeId===r.id}">${r.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="64" height="64" loading="lazy">`:''}<span><strong>${esc(r.name)}</strong><small>${esc(timeLabel(r))} - ${fmt(calculate(r).per_serving)} kcal / serving</small></span></button>`).join('')||`<p class="muted">${state.recipes.length?'No matching dishes.':'No saved dishes yet. Create a recipe in Dish List first.'}</p>`;
+  patchMarkup($('#replace-list'),dishes.map(r=>`<button class="replacement-choice${replacement?.recipeId===r.id?' selected':''}" data-action="choose-replacement" data-id="${esc(r.id)}" aria-pressed="${replacement?.recipeId===r.id}">${r.photo_url?`<img src="${esc(displayPhoto(r.photo_url))}" alt="" width="64" height="64" loading="lazy">`:''}<span><strong>${esc(r.name)}</strong><small>${esc(timeLabel(r))} - ${fmt(calculate(r).per_serving)} kcal / serving</small></span></button>`).join('')||`<p class="muted">${state.recipes.length?'No matching dishes.':'No saved dishes yet. Create a recipe in Dish List first.'}</p>`);
 }
 function selectReplacement(id) {
   if(weekMutationPending)return;const recipe=state.recipes.find(r=>r.id===id);if(!replacement||!recipe)return;
   replacement.recipeId=id;renderReplacementList();$('#replace-modal').classList.add('expanded');
-  $('#replacement-details').hidden=false;$('#replacement-details').innerHTML=detailsMarkup(recipe,true);$('#replace-confirm').disabled=false;
+  $('#replacement-details').hidden=false;patchMarkup($('#replacement-details'),detailsMarkup(recipe,true));$('#replace-confirm').disabled=false;
   $('#replacement-details').scrollTop=0;
 }
 function refreshRecipeDialogs(){
@@ -380,7 +418,7 @@ function refreshRecipeDialogs(){
     const top=$('#dish-detail').scrollTop,context=detailContext;
     if(context.week){const index=state.plans.find(p=>p.week_start===context.week)?.days.findIndex(d=>d.date===context.date);if(index>=0)showMeal(context.week,index,false);}
     else if(state.recipes.some(r=>r.id===context.id))showDetails(context.id,false);
-    else{$('#dish-detail').innerHTML='<article class="recipe-detail"><h2>Dish deleted</h2></article>';detailEdit(null);}
+    else{patchMarkup($('#dish-detail'),'<article class="recipe-detail"><h2>Dish deleted</h2></article>');detailEdit(null);}
     $('#dish-detail').scrollTop=top;
   }
   if($('#replace-modal').open&&replacement&&!weekMutationPending){
@@ -388,7 +426,7 @@ function refreshRecipeDialogs(){
     renderReplacementList();
     if(replacement.recipeId){
       if(state.recipes.some(r=>r.id===replacement.recipeId))selectReplacement(replacement.recipeId);
-      else{replacement.recipeId=null;$('#replace-confirm').disabled=true;$('#replacement-details').innerHTML='<h2>Dish deleted</h2>';}
+      else{replacement.recipeId=null;$('#replace-confirm').disabled=true;patchMarkup($('#replacement-details'),'<h2>Dish deleted</h2>');}
     }
     $('#replace-list').scrollTop=left;$('#replacement-details').scrollTop=right;
   }
@@ -552,11 +590,19 @@ $('#transcript-upload').addEventListener('change',async event=>{
     $('#plan-vegan').checked=!!state.plan?.vegan_only;$('#plan-running').checked=!!state.plan?.prioritize_running;
     if(state.plan_job)await followPlanJob(state.plan_job);
     await checkStatus();setTimeout(resolveSavedFoods,0);
-    setInterval(()=>refresh().catch(()=>{}),60000);
+    scheduleCalendarRefresh();
   } catch (error) { notify('Could not load the app: '+error.message,true); }
 })();
 
-window.addEventListener('focus',async()=>{if(!busy&&!planJobId&&!weekMutationPending){try{await refresh();}catch{}}});
+function refreshCalendarIfNeeded(){
+  if(!document.hidden&&state.calendar&&state.calendar.today!==HealthLocal.calendar().today)refresh().catch(()=>{});
+}
+function scheduleCalendarRefresh(){
+  const now=new Date(),midnight=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+  setTimeout(()=>{refreshCalendarIfNeeded();scheduleCalendarRefresh();},midnight-now+100);
+}
+document.addEventListener('visibilitychange',refreshCalendarIfNeeded);
+window.addEventListener('focus',refreshCalendarIfNeeded);
 
 $('#replace-search').addEventListener('input',renderReplacementList);
 $('#replace-modal').addEventListener('cancel',event=>{if(weekMutationPending)event.preventDefault();});
