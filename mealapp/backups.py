@@ -186,6 +186,8 @@ def validate_recipe(recipe,foods):
 def validate_settings(settings):
     if not isinstance(settings,dict):raise ValueError('Invalid backup settings.')
     for key,value in settings.items():
+        if key=='household_servings' and value is not None and (type(value) is not int or not 1<=value<=9007199254740991):
+            raise ValueError('Default household servings must be a positive whole number, or left blank.')
         if key in ('text_model','vision_model','vietnamese_model','english_model') and (not isinstance(value,str) or not value.strip()):
             raise ValueError('Invalid model settings.')
         if key in ('ollama_url','usda_api_key','speech_model','speech_language') and not isinstance(value,str):raise ValueError('Invalid settings value.')
@@ -194,6 +196,24 @@ def validate_settings(settings):
     if 'ollama_url' in settings:
         endpoint=urllib.parse.urlsplit(settings['ollama_url'])
         if endpoint.scheme not in ('http','https') or not endpoint.hostname or endpoint.username or endpoint.password:raise ValueError('Invalid Ollama URL in backup.')
+
+
+def validate_serving_plan(plan,foods=None):
+    if not isinstance(plan,dict) or 'servings' not in plan or 'recipe_servings' not in plan:
+        raise ValueError('Invalid planned serving quantities.')
+    validate_settings({'household_servings':plan['servings']})
+    amount=plan['recipe_servings']
+    if amount is not None and (not numeric(amount) or amount<=0):raise ValueError('Invalid planned recipe yield.')
+    items=plan.get('ingredients')
+    if not isinstance(items,list) or len(items)>200:raise ValueError('Invalid planned ingredients.')
+    for item in items:
+        if not isinstance(item,dict) or not isinstance(item.get('name'),str) or not item['name'].strip() or not numeric(item.get('grams')):
+            raise ValueError('Invalid planned ingredient.')
+        if 'quantity' in item and not isinstance(item['quantity'],str):raise ValueError('Invalid planned quantity.')
+        if foods is not None and item.get('food_id') and item['food_id'] not in foods:raise ValueError('A planned ingredient references a missing food value.')
+    calories=plan.get('calories')
+    if not isinstance(calories,dict) or any(key not in calories for key in ('total','per_serving','complete','missing')) or not isinstance(calories['complete'],bool) or not isinstance(calories['missing'],list) or not numeric(calories['total']) or not numeric(calories['per_serving']):
+        raise ValueError('Invalid planned calorie values.')
 
 
 def validate_data(data,images):
@@ -247,6 +267,7 @@ def validate_data(data,images):
                 validate_recipe(day['recipe'],tables['foods'])
                 if not isinstance(day['recipe'].get('ingredients'),list):raise ValueError('Missing planned recipe ingredients.')
                 if day['recipe'].get('id')!=day.get('recipe_id'):raise ValueError('Planned dish snapshot ID mismatch.')
+            if 'serving_plan' in day:validate_serving_plan(day['serving_plan'],tables['foods'])
     if tables['state'].get('weekly_history_migrated') is not True:raise ValueError('Missing weekly history metadata.')
     if 'week_expansion' in tables['state']:
         choices=tables['state']['week_expansion']

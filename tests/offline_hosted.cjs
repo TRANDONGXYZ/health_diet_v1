@@ -27,6 +27,16 @@ async function main(){db=new PGlite();await db.exec(`create role anon nologin;cr
   const restoreOp={id:crypto.randomUUID(),kind:'restore',base:staged.cursor,since:staged.cursor,document:doc};const restored=await call(a,'/api/sync/push',restoreOp);assert.equal(restored.changes[0].value.name,'Restored hosted soup');assert.deepEqual(await call(a,'/api/sync/push',restoreOp),restored);
   app.kill();await new Promise(r=>app.once('exit',r));await start();assert.deepEqual(await call(a,'/api/sync/push',restoreOp),restored);assert.deepEqual(await call(a,'/media/'+name),png);
   const tomb=await call(a,'/api/sync/push',{id:crypto.randomUUID(),since:restored.cursor,changes:[{key:'recipes/'+id,base:restored.cursor,value:null}]});assert.equal(tomb.changes[0].value,null);assert.equal((await call(b,'/api/sync/pull?since='+second.cursor)).changes.length,0);
-  console.log('PASS hosted entrypoint + PostgreSQL: separate anonymous testers, records and idempotency survive process restart, private owner access, only delta RPCs after bootstrap; no full workspace reads/saves.');
+  const current=await call(a,'/api/sync/pull?since=0'),other=crypto.randomUUID(),week='2026-11-23';
+  const servingPlan={servings:3,recipe_servings:5,ingredients:[{name:'rice',quantity:'300 g',grams:300},{name:'salt',quantity:'to taste',grams:null}],calories:{total:0,per_serving:0,complete:false,missing:['rice','salt']}};
+  await call(a,'/api/sync/push',{id:crypto.randomUUID(),since:current.cursor,changes:[
+    {key:'settings',base:current.changes.find(r=>r.key==='settings')?.version||0,value:{household_servings:3}},
+    {key:'recipes/'+other,base:0,value:{id:other,name:'Original five-serving rice',servings:5,ingredients:[{name:'rice',quantity:'500 g',grams:500}]}},
+    {key:'plans/'+week,base:0,value:{week_start:week}},
+    {key:'meals/'+week+'/'+week,base:0,value:{date:week,recipe_id:other,serving_plan:servingPlan}}
+  ]});
+  app.kill();await new Promise(r=>app.once('exit',r));await start();const portions=await call(a,'/api/sync/pull?since='+current.cursor);
+  assert.equal(portions.changes.find(r=>r.key==='settings').value.household_servings,3);const planned=portions.changes.find(r=>r.key==='meals/'+week+'/'+week).value;assert.deepEqual(planned.serving_plan,servingPlan);assert.equal(planned.recipe.ingredients[0].quantity,'500 g');assert.equal(planned.recipe.servings,5);assert.equal((await call(b,'/api/sync/pull?since='+second.cursor)).changes.length,0);
+  console.log('PASS hosted entrypoint + PostgreSQL: separate anonymous testers, records and idempotency survive process restart, private owner access, only delta RPCs after bootstrap; household settings and distinct original/planned quantities survive the existing SQL and process restart.');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(app&&app.exitCode===null){app.kill();await new Promise(r=>app.once('exit',r));}if(provider)await new Promise(r=>provider.close(r));await tail;await db?.close();});

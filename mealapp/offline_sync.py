@@ -84,12 +84,13 @@ def validate_operation(op):
             start = weekly.week_date(week)
             if not isinstance(value, dict) or value.get('date') != day or not 0 <= (date.fromisoformat(day)-start).days <= 6: raise ValueError('Invalid meal date.')
             if value.get('recipe_id') is not None and not isinstance(value['recipe_id'], str): raise ValueError('Invalid dish ID.')
+            if 'serving_plan' in value: backups.validate_serving_plan(value['serving_plan'])
         elif key.startswith('expansion/'):
             weekly.week_date(key[10:])
             if type(value) is not bool: raise ValueError('Invalid collapse state.')
         elif key == 'settings':
             backups.validate_settings(value)
-            if hosted.enabled() and any(k not in ('language','text_model','vision_model','vietnamese_model','english_model') for k in value):
+            if hosted.enabled() and any(k not in ('language','text_model','vision_model','vietnamese_model','english_model','household_servings') for k in value):
                 raise ValueError('Hosted provider settings are managed by the beta operator.')
 
 

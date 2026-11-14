@@ -79,6 +79,41 @@ const HealthLocal = (() => {
   async function base64(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
   async function photo(blob){const name=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()))].map(b=>b.toString(16).padStart(2,'0')).join('')+'.png';await verifyPhoto(name,blob);await write((data,tx)=>{tx.objectStore('photos').put({name,blob});if(!entities(data)['photos/'+name]){const order=(data.meta.order||0)+1;tx.objectStore('outbox').put({id:id(),order,kind:'photo',name});tx.objectStore('meta').put({id:'order',value:order});}});schedule();return {photo_url:'/media/'+name};}
   function snapshot(recipe,foods){const r=clone(recipe);delete r.source_text;delete r.legacy_groups;delete r.__version;r.calories=calories(r,foods);return r;}
+  const positive=value=>typeof value==='number'&&Number.isFinite(value)&&value>0;
+  const validHousehold=value=>Number.isSafeInteger(value)&&value>0;
+  const rounded=value=>Number(value.toPrecision(12));
+  function scaleQuantity(text,factor){
+    if(typeof text!=='string'||factor===1||/to taste|as needed|as required|vừa (?:ăn|đủ)|tùy (?:ý|khẩu vị)/iu.test(text))return text;
+    const fractions={'¼':.25,'½':.5,'¾':.75,'⅓':1/3,'⅔':2/3,'⅛':.125,'⅜':.375,'⅝':.625,'⅞':.875};
+    const pattern=/(?:\d+\s+)?\d+\s*\/\s*\d+|\d+\s*[¼½¾⅓⅔⅛⅜⅝⅞]|\d+(?:[.,]\d+)*|[¼½¾⅓⅔⅛⅜⅝⅞]/gu;
+    const leading=/^(?:\s|~|≈|about\b|approximately\b|khoảng\b)*/iu.exec(text)[0].length;
+    const first=[...text.matchAll(pattern)][0];if(!first||first.index!==leading)return text;
+    function scale(raw){
+      let value;
+      if(raw.includes('/')){const m=/^(?:(\d+)\s+)?(\d+)\s*\/\s*(\d+)$/.exec(raw);if(!m||!Number(m[3]))return raw;value=Number(m[1]||0)+Number(m[2])/Number(m[3]);}
+      else if(fractions[raw.at(-1)]!==undefined)value=Number(raw.slice(0,-1).trim()||0)+fractions[raw.at(-1)];
+      else value=Number(/^\d{1,3}(?:,\d{3})+$/.test(raw)?raw.replaceAll(',',''):raw.replace(',','.'));
+      return Number.isFinite(value)?String(rounded(value*factor)):raw;
+    }
+    // In "2 x 400 g" or "2 cans (400 g each)", scale the count once.
+    const rest=text.slice(first.index+first[0].length);
+    if(/^\s*(?:[x×]|(?:cans?|packs?|packages?|tins?|hộp|gói)\b).*\d/iu.test(rest))return text.slice(0,first.index)+scale(first[0])+rest;
+    return text.replace(pattern,(raw,offset)=>text[offset+raw.length]==='%'?raw:scale(raw));
+  }
+  function makeServingPlan(recipe,foods,household){
+    const servings=validHousehold(household)?household:null,recipe_servings=positive(recipe.servings)?recipe.servings:null;
+    const factor=servings&&recipe_servings?servings/recipe_servings:1,c=calories(recipe,foods);
+    const ingredients=clone(recipe.ingredients||[]).map(item=>{
+      if(factor!==1){if(typeof item.quantity==='string')item.quantity=scaleQuantity(item.quantity,factor);if(typeof item.grams==='number'&&Number.isFinite(item.grams))item.grams=rounded(item.grams*factor);}return item;
+    });
+    return {servings,recipe_servings,ingredients,calories:{...c,total:factor===1?c.total:rounded(c.total*factor)}};
+  }
+  function plannedRecipe(recipe,plan){return plan?{...recipe,ingredients:clone(plan.ingredients),servings:plan.servings&&plan.recipe_servings?plan.servings:plan.recipe_servings,calories:clone(plan.calories)}:recipe;}
+  function validateServingPlan(plan){
+    if(!plan||typeof plan!=='object'||Array.isArray(plan)||!('servings' in plan)||!('recipe_servings' in plan)||plan.servings!==null&&!validHousehold(plan.servings)||plan.recipe_servings!==null&&!positive(plan.recipe_servings)||!Array.isArray(plan.ingredients)||plan.ingredients.length>200)throw new Error('Invalid planned serving quantities.');
+    for(const i of plan.ingredients)if(!i||typeof i.name!=='string'||!i.name.trim()||i.quantity!==undefined&&typeof i.quantity!=='string'||i.grams!=null&&(typeof i.grams!=='number'||!Number.isFinite(i.grams)||i.grams<0))throw new Error('Invalid planned ingredient.');
+    const c=plan.calories;if(!c||typeof c.complete!=='boolean'||!Array.isArray(c.missing)||['total','per_serving'].some(key=>c[key]!==null&&(typeof c[key]!=='number'||!Number.isFinite(c[key])||c[key]<0)))throw new Error('Invalid planned calorie values.');
+  }
   function normal(value){return String(value||'').toLowerCase().replace(/đ/g,'d').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\x00-\x7f]/g,'').trim().replace(/\s+/g,' ');}
   function findFood(item,foods){return item.food_id?foods.find(f=>f.id===item.food_id):foods.find(f=>[f.name,f.vi_name,f.id,...(f.aliases||[])].some(v=>normal(v)===normal(item.name)));}
   function calories(recipe,foods){let total=0;const missing=[];for(const i of recipe.ingredients||[]){const f=findFood(i,foods);if(i.grams==null||!f)missing.push(i.name);else total+=i.grams*f.kcal/100;}return {total,per_serving:recipe.servings>0?total/recipe.servings:null,complete:!missing.length&&!!recipe.ingredients?.length,missing};}
@@ -94,7 +129,7 @@ const HealthLocal = (() => {
     for(const i of r.ingredients){i.name=String(i.name||'').trim().slice(0,180);if(!i.name||i.grams!=null&&(!Number.isFinite(i.grams)||i.grams<0||i.grams>1000000))throw new Error('Check ingredient names and weights.');i.quantity=String(i.quantity||'').slice(0,150);i.source_quote=String(i.source_quote||'').slice(0,1500);}
     if(r.photo_url&&!/^\/media\/[a-f0-9]{64}\.png$/.test(r.photo_url))throw new Error('Upload a valid dish photo first.');
   }
-  function practical(recipe,foods){const minutes=recipe.measured_minutes||recipe.estimated_minutes;return {recipe_id:recipe.id,recipe:snapshot(recipe,foods),timing:minutes>25?'night before':'morning',prep:'Review the original source and weigh the listed ingredients ahead of time.',reason:'Selected from your saved dishes.'};}
+  function practical(recipe,foods,household){const minutes=recipe.measured_minutes||recipe.estimated_minutes;return {recipe_id:recipe.id,recipe:snapshot(recipe,foods),serving_plan:makeServingPlan(recipe,foods,household),timing:minutes>25?'night before':'morning',prep:'Review the original source and weigh the listed ingredients ahead of time.',reason:'Selected from your saved dishes.'};}
   async function mutate(path,payload){let result;await lock(':action',async()=>{
     const data=await read(),s=view(data),map=entities(data),changes=[],put=(key,value)=>changes.push({key,value});
     if(path==='/api/plan/result'&&payload.job_id&&(data.meta.completedPlanJobs||[]).includes(payload.job_id)){result={ok:true};return;}
@@ -102,17 +137,17 @@ const HealthLocal = (() => {
     else if(path==='/api/recipes/delete'){put('recipes/'+payload.id,null);result={ok:true};}
     else if(path==='/api/recipes/running'){const r=map['recipes/'+payload.id];if(!r)throw new Error('Dish not found.');put('recipes/'+payload.id,{...r,good_for_running:payload.good_for_running});result={recipe:{...r,good_for_running:payload.good_for_running}};}
     else if(path==='/api/foods'){const old=payload.id?s.foods.find(f=>f.id===payload.id):findFood({name:payload.name},s.foods);const food={...old,...payload,id:old?.id||payload.id||normal(payload.name),origin:payload.origin||'manual'};if(!food.name?.trim()||!Number.isFinite(food.kcal)||food.kcal<0||food.kcal>1000)throw new Error('Enter a food name and calories between 0 and 1000.');delete food.base;delete food.original;put('foods/'+food.id,food);result=food;}
-    else if(path==='/api/settings'){const settings={...(map.settings||{}),...payload,language:'auto'};delete settings.base;delete settings.original;if(!payload.usda_api_key){if(map.settings?.usda_api_key)settings.usda_api_key=map.settings.usda_api_key;else delete settings.usda_api_key;}put('settings',settings);result={ok:true};}
+    else if(path==='/api/settings'){const settings={...(map.settings||{}),...payload,language:'auto'};if(settings.household_servings!==undefined&&settings.household_servings!==null&&!validHousehold(settings.household_servings))throw new Error('Default household servings must be a positive whole number, or left blank.');delete settings.base;delete settings.original;if(!payload.usda_api_key){if(map.settings?.usda_api_key)settings.usda_api_key=map.settings.usda_api_key;else delete settings.usda_api_key;}put('settings',settings);result={ok:true};}
     else if(path==='/api/plan/expansion'){monday(payload.week_start);put('expansion/'+payload.week_start,payload.expanded);result={ok:true};}
     else if(path==='/api/plan/delete'){put('plans/'+payload.week_start,null);result={ok:true};}
     else if(path==='/api/plan/add'){const week=payload.week_start;monday(week);if(week<=s.calendar.week_start||week>s.calendar.advance_limit)throw new Error('Choose one of the next eight weeks.');if(map['plans/'+week])throw new Error('This week already exists.');const plan={week_start:week,method:'manual',generated_on:s.calendar.today,vegan_only:false,prioritize_running:false,warnings:[]};put('plans/'+week,plan);const days=Array.from({length:7},(_,i)=>({date:date(week,i),recipe_id:null}));for(const day of days)put('meals/'+week+'/'+day.date,day);result={plan:{...plan,days}};}
-    else if(path==='/api/plan/replace'){const week=payload.week_start,key='meals/'+week+'/'+payload.date;if(!map['plans/'+week]||!map[key])throw new Error('This meal slot no longer exists.');const recipe=s.recipes.find(r=>r.id===payload.recipe_id);if(!recipe)throw new Error('Select a saved dish.');const day={date:payload.date,...practical(recipe,s.foods)};put(key,day);result={ok:true};}
+    else if(path==='/api/plan/replace'){const week=payload.week_start,key='meals/'+week+'/'+payload.date;if(!map['plans/'+week]||!map[key])throw new Error('This meal slot no longer exists.');const recipe=s.recipes.find(r=>r.id===payload.recipe_id);if(!recipe)throw new Error('Select a saved dish.');const day={date:payload.date,...practical(recipe,s.foods,s.settings.household_servings)};put(key,day);result={ok:true};}
     else if(path==='/api/plan/generate'||path==='/api/plan/result'){
       if(path==='/api/plan/result'&&payload.originals&&Object.entries(payload.originals).some(([key,value])=>!equal(map[key]??null,value)))throw new Error('This week changed while AI was running. Your saved plan was kept; generate again.');
       const week=payload.week_start||s.calendar.week_start;monday(week);if(week<s.calendar.week_start||week>s.calendar.advance_limit)throw new Error('Generate only for the current week or the next eight weeks.');if(week>s.calendar.week_start&&!map['plans/'+week])throw new Error('Add this future week first.');let recipes=s.recipes.filter(r=>!payload.vegan_only||r.vegan===true);if(!recipes.length)throw new Error('Save at least one matching dish before generating.');
       const shuffle=items=>{const a=[...items];for(let i=a.length-1;i>0;i--){const j=crypto.getRandomValues(new Uint32Array(1))[0]%(i+1);[a[i],a[j]]=[a[j],a[i]];}return a;};if(payload.method==='random')recipes=shuffle(recipes);if(payload.prioritize_running)recipes=[...recipes.filter(r=>r.good_for_running),...recipes.filter(r=>!r.good_for_running)];const dates=Array.from({length:7},(_,i)=>date(week,i)).filter(d=>week>s.calendar.week_start||d>=s.calendar.today);
       const plan={...(map['plans/'+week]||{}),week_start:week,generated_on:s.calendar.today,method:payload.method||'AI',vegan_only:!!payload.vegan_only,prioritize_running:!!payload.prioritize_running,warnings:payload.prioritize_running&&!recipes.some(r=>r.good_for_running)?['No matching saved dishes are marked Good for Running. Other saved dishes will be used.']:[]};put('plans/'+week,plan);
-      dates.forEach((day,i)=>{const suggestion=payload.days?.find(d=>d.date===day),recipe=suggestion?s.recipes.find(r=>r.id===suggestion.recipe_id):recipes[i%recipes.length];if(!recipe||payload.vegan_only&&recipe.vegan!==true)throw new Error('A suggested dish changed or was deleted; your saved plan was kept.');put('meals/'+week+'/'+day,{...practical(recipe,s.foods),...suggestion,date:day,recipe:snapshot(recipe,s.foods)});});result={ok:true};
+      dates.forEach((day,i)=>{const suggestion=payload.days?.find(d=>d.date===day),recipe=suggestion?s.recipes.find(r=>r.id===suggestion.recipe_id):recipes[i%recipes.length];if(!recipe||payload.vegan_only&&recipe.vegan!==true)throw new Error('A suggested dish changed or was deleted; your saved plan was kept.');put('meals/'+week+'/'+day,{...practical(recipe,s.foods,s.settings.household_servings),...suggestion,date:day,recipe:snapshot(recipe,s.foods)});});result={ok:true};
     }else throw new Error('Unknown local action.');
     if(payload.base!==undefined&&changes.length===1)changes[0].base=payload.base;if(payload.original!==undefined&&changes.length===1)changes[0].original=payload.original;
     await commit(changes,{},path==='/api/plan/result'?{planJob:data.meta.planJob?.id===payload.job_id?null:data.meta.planJob||null,lastPlanJob:payload.job_id||null,completedPlanJobs:[...(data.meta.completedPlanJobs||[]),payload.job_id].filter(Boolean).slice(-100)}:{});
@@ -140,5 +175,5 @@ const HealthLocal = (() => {
     tx.objectStore('meta').put({id:'error',value:''});
   });schedule();}
   channel?.addEventListener('message',()=>{publish();schedule();});window.addEventListener('online',()=>{sessionAt=0;schedule();publish();downloadPhotos().catch(error=>errorMessage(error.message));});window.addEventListener('offline',()=>publish());
-  return {init,read,view,entities,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
+  return {init,read,view,entities,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
 })();

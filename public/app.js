@@ -7,6 +7,8 @@ const safeLink = v => { try { const u = new URL(v); return ['http:','https:'].in
 const fmt = n => Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
 let state = {recipes:[],foods:[],plan:null,settings:{}}, token = '', draft = null, photo = null, matches = [], busy = false, notifyTimer;
 let cameraStream = null;
+let activeTab='weekly',tabsReady=false,detailOrigin=null,editorOrigin=null;
+try{if(localStorage.getItem('health-diet-active-tab')==='dishes')activeTab='dishes';}catch{/* Browser preferences may be disabled. */}
 const weekPreferences=new Map(), weekExpansion=new Map();
 let expansionSaves=Promise.resolve();
 const dayNames = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
@@ -93,9 +95,12 @@ function closeDialog(dialog){if(!dialog?.open)return;dialog.close();finishDialog
 document.addEventListener('close',event=>{if(event.target.matches('dialog'))finishDialogClose(event.target);},true);
 document.addEventListener('wheel',event=>{const active=$$('dialog[open]').at(-1);if(active&&!active.contains(event.target))event.preventDefault();},{passive:false});
 
-function tab(name) {
-  ['weekly','dishes'].forEach(id => { $('#'+id).hidden = name !== id; $(`[data-tab=${id}]`).setAttribute('aria-selected',String(name === id)); });
+function tab(name,remember=true) {
+  activeTab=name==='dishes'?'dishes':'weekly';
+  if(remember)try{localStorage.setItem('health-diet-active-tab',activeTab);}catch{}
+  ['weekly','dishes'].forEach(id => { $('#'+id).hidden = !tabsReady||activeTab !== id; $(`[data-tab=${id}]`).setAttribute('aria-selected',String(activeTab === id)); });
 }
+tab(activeTab,false);
 async function refresh() {
   renderState(HealthLocal.view(await HealthLocal.read()));
 }
@@ -104,8 +109,9 @@ function renderState(next){
   $('#dish-count').textContent = state.recipes.length; $('#food-count').textContent = `${state.foods.length} food references`;
   $('#food-options').innerHTML = state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join('');
   renderDishes(); renderWeek();
+  tabsReady=true;tab(activeTab,false);
   $('#storage-label').textContent='Saved on this device · Changes sync in the background · Export backups regularly';
-  $('#settings-form').hidden=!!state.hosted;
+  $('#ai-settings').hidden=!!state.hosted;
   if(state.hosted&&!$('#hosted-settings-info'))$('#settings-form').insertAdjacentHTML('beforebegin','<p id="hosted-settings-info" class="footnote">AI is provided by the beta operator through Groq. No personal API key is needed. Keep browser cookies to return to this private workspace, and export backups regularly.</p>');
   if(state.hosted){$('#busy-indicator small').textContent='Hosted AI may be limited during the public beta.';$('#photo-modal>.muted').textContent='Identify a food with hosted AI, confirm the name, then retrieve nutrition and guidance online. A photo cannot reveal exact ingredients or portion weight.';}
   if(state.hosted)$('#import-box .import-content>p.footnote:last-of-type').textContent='Vietnamese and English stay in the source language. Source retrieval is temporarily disabled. Paste a transcript or upload an audio/video file you are allowed to use (24 MB, ten minutes maximum). Review extracted amounts before saving.';
@@ -157,7 +163,7 @@ function renderDishes() {
 }
 function dateLabel(start, offset, options) { const d = new Date(start+'T12:00:00'); d.setDate(d.getDate()+offset); return d.toLocaleDateString('en-GB',options); }
 function weekRange(start) { return dateLabel(start,0,{day:'numeric',month:'short'})+' - '+dateLabel(start,6,{day:'numeric',month:'short',year:'numeric'}); }
-function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};return (past||day.date<state.calendar.today?day.recipe:(state.recipes.find(r=>r.id===day.recipe_id)||day.recipe))||{id:day.recipe_id,name:'Dish unavailable',ingredients:[],notes:'The original recipe was removed before this plan was archived.',calories:{total:null,per_serving:null,complete:false,missing:['Recipe details unavailable']}}; }
+function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};const original=(past||day.date<state.calendar.today?day.recipe:(state.recipes.find(r=>r.id===day.recipe_id)||day.recipe))||{id:day.recipe_id,name:'Dish unavailable',ingredients:[],notes:'The original recipe was removed before this plan was archived.',calories:{total:null,per_serving:null,complete:false,missing:['Recipe details unavailable']}};return HealthLocal.plannedRecipe(original,day.serving_plan); }
 function mealCard(day,index,plan,past) {
   if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
   const r=mealRecipe(day,past),frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id),c=day.deleted?null:frozen?r?.calories:calculate(r||{}),isToday=day.date===state.calendar.today;
@@ -207,16 +213,21 @@ async function createWeek(){
 }
 function showMeal(week,index) {
   const plan=(state.plans||[]).find(p=>p.week_start===week);const day=plan?.days[index];if(!day)return;
+  detailOrigin=editorLocation(week,index);
   if(day.deleted){detailEdit(null);$('#dish-detail').innerHTML=`<article class="recipe-detail"><h2>Dish deleted</h2><p class="dish-meta">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</p></article>`;open('#detail-modal');return;}
   const past=week<state.calendar.week_start,r=mealRecipe(day,past);if(!r){notify('This dish is unavailable.',true);return;}
-  const frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id);detailEdit(frozen?null:r.id);
-  $('#dish-detail').innerHTML=(past?'<p class="footnote">Past week - saved dish details.</p>':'')+detailsMarkup(r,frozen)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`;
+  const linked=state.recipes.find(item=>item.id===day.recipe_id),frozen=past||day.date<state.calendar.today||!linked;detailEdit(linked?.id);
+  const portion=day.serving_plan,servings=portion?`<p class="footnote" id="meal-servings">${portion.servings?'Planned meal: '+portion.servings+' servings':'Planned servings not set'} · ${portion.recipe_servings?'Original recipe: '+portion.recipe_servings+' servings':'Original recipe yield not stated'}.${!portion.servings||!portion.recipe_servings?' Quantities kept as written in the original recipe.':''}</p>`:'';
+  $('#dish-detail').innerHTML=(past?'<p class="footnote">Past week - saved dish details.</p>':'')+servings+detailsMarkup(r,frozen)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`;
   open('#detail-modal');
 }
 function runningPill(recipe) { return recipe.good_for_running ? '<span class="pill">Good for Running</span>' : ''; }
 function blankRecipe() { return {name:'',vegan:null,good_for_running:false,servings:null,source_url:'',source_text:'',notes:'',measured_minutes:null,estimated_minutes:null,ingredients:[]}; }
-function editRecipe(recipe) {
+function editorLocation(week=null,index=null){const anchor=week?$(`.meal-card[data-week="${week}"][data-day="${index}"]`):null;return {tab:activeTab,x:pageScrollLock?.x??scrollX,y:pageScrollLock?.y??scrollY,week,index,anchorTop:anchor?.getBoundingClientRect().top};}
+function restoreEditorLocation(origin){if(!origin)return;tab(origin.tab);const anchor=origin.week?$(`.meal-card[data-week="${origin.week}"][data-day="${origin.index}"]`):null;const offset=anchor&&Number.isFinite(origin.anchorTop)?anchor.getBoundingClientRect().top-origin.anchorTop:0;window.scrollTo({left:origin.x,top:anchor&&Number.isFinite(origin.anchorTop)?scrollY+offset:origin.y,behavior:'instant'});}
+function editRecipe(recipe,origin=null) {
   if(busy){notify("Wait for the current task to finish.");return;}
+  editorOrigin=origin||editorLocation();
   draft = structuredClone(recipe || blankRecipe());if(recipe){draft.__version=state.versions?.['recipes/'+recipe.id]||0;draft.__original=structuredClone(recipe);delete draft.__original.__original;}
   $('#recipe-title').textContent = recipe ? 'Edit recipe' : 'Create recipe';
   $('#recipe-message').textContent = ''; open('#recipe-modal');fillRecipe(); $('#import-box').open = !recipe;
@@ -281,7 +292,7 @@ function detailsMarkup(r, frozen=false) {
   return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2></div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(displayPhoto(r.photo_url))}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
 }
 function detailEdit(id){const button=$('#detail-edit');button.hidden=!id;button.dataset.id=id||'';}
-function showDetails(id) { const r = state.recipes.find(r => r.id === id); if (!r) return; $('#dish-detail').innerHTML = detailsMarkup(r); detailEdit(r.id);open('#detail-modal'); }
+function showDetails(id) { const r = state.recipes.find(r => r.id === id); if (!r) return; detailOrigin=editorLocation();$('#dish-detail').innerHTML = detailsMarkup(r); detailEdit(r.id);open('#detail-modal'); }
 let planJobId=null,planJobWeek=null,pendingPlanWeek=null,planPollTimer=null, planPollPending=false, requestedPlanCancel=false;
 function jobWeek(){return planJobWeek||pendingPlanWeek||state.calendar?.week_start;}
 function planProgress(message){$$('[data-plan-progress]').forEach(node=>{if(node.dataset.week===jobWeek())node.textContent=message;});}
@@ -487,7 +498,7 @@ document.addEventListener('click', async event => {
   if (!action) return;
   if (action === 'new') editRecipe();
   if (action === 'go-dishes') tab('dishes');
-  if (action === 'edit') { closeDialog($('#detail-modal')); editRecipe(state.recipes.find(r => r.id === id)); }
+  if (action === 'edit') { const origin=button.closest('#detail-modal')?detailOrigin:editorLocation();closeDialog($('#detail-modal')); editRecipe(state.recipes.find(r => r.id === id),origin); }
   if (action === 'details') showDetails(id);
   if (action === 'delete') {
     const recipe = state.recipes.find(r => r.id === id);
@@ -531,14 +542,15 @@ document.addEventListener('click', async event => {
   if (action === 'identify') await work(state.hosted?'Identifying the food with hosted AI':'Identifying the food locally',async () => { const result = await api('/api/nutrition/identify',{image:photo}); $('#nutrition-query').value = result.name; $('#identification').textContent = `${result.name} · ${result.confidence} confidence. ${result.explanation}\nConfirm or correct the name below before looking it up.`; });
   if (action === 'nutrition-search') await nutritionSearch();
   if (action === 'choose-nutrition') await chooseNutrition(Number(button.dataset.index));
-  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = ''; open('#settings-modal'); await checkStatus(); }
+  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vision_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = '';f.elements.household_servings.value=state.settings.household_servings??''; open('#settings-modal'); await checkStatus(); }
   if (action === 'export') await exportBackup();
 });
 $('#recipe-form').addEventListener('submit',async event => {
   event.preventDefault();
   await work('Saving recipe on this device',async (task) => {
+    const origin=editorOrigin;
     const result=await api('/api/recipes',readRecipe());
-    await refresh();task.check();closeDialog($('#recipe-modal'));tab('dishes');
+    await refresh();task.check();closeDialog($('#recipe-modal'));restoreEditorLocation(origin);
     notify(result.warnings.length?'Recipe saved. Some estimates are unavailable: '+result.warnings.join(' '):'Recipe saved.');
     setTimeout(resolveSavedFoods,0);
   },{pollAI:false});
@@ -557,7 +569,7 @@ $('#food-form').addEventListener('submit',async event => {
   await work('Saving your food value',async (task) => { await api('/api/foods',{original:f.elements.id.value?JSON.parse(f.dataset.original||'null'):undefined,base:f.elements.id.value?Number(f.dataset.version||0):undefined,id:f.elements.id.value,name:f.elements.name.value,kcal:Number(f.elements.kcal.value),aliases:f.elements.aliases.value.split(',').map(s => s.trim()).filter(Boolean),note:f.elements.note.value}); await refresh();task.check(); renderFoods(); if ($('#recipe-modal').open) updateCalories(); f.reset(); notify('Food value saved. Recipe calories have been updated.'); },{pollAI:false});
 });
 $('#settings-form').addEventListener('submit',async event => {
-  event.preventDefault(); const data = {...Object.fromEntries(new FormData(event.target)),base:Number(event.target.dataset.version||0),original:JSON.parse(event.target.dataset.original||'null')};
+  event.preventDefault(); const data = {...(state.hosted?{}:Object.fromEntries(new FormData(event.target))),household_servings:event.target.elements.household_servings.value===''?null:Number(event.target.elements.household_servings.value),base:Number(event.target.dataset.version||0),original:JSON.parse(event.target.dataset.original||'null')};
   await work('Saving local settings',async (task) => { await api('/api/settings',data); await refresh();task.check(); closeDialog($('#settings-modal')); notify('Settings saved.'); },{pollAI:false});
 });
 $('#dish-search').addEventListener('input',renderDishes); $('#vegan-filter').addEventListener('change',renderDishes); $('#running-filter').addEventListener('change',renderDishes); $('#food-search').addEventListener('input',renderFoods);
