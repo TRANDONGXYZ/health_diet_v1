@@ -39,3 +39,6 @@ html{scrollbar-gutter:stable}html.modal-open,body.modal-open{overflow:hidden;ove
 [data-action=retrieve]:disabled{cursor:not-allowed}
 
 .icon-sprite{position:absolute;width:0;height:0;overflow:hidden}.action-icon,.meal-actions .action-icon{display:inline-flex;align-items:center;justify-content:center;padding:0;flex-shrink:0}.action-icon svg{pointer-events:none}
+.device-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+#pair-modal[open]{display:flex;flex-direction:column;overflow:hidden}#pair-modal .modal-head{flex:0 0 auto;flex-wrap:wrap;gap:12px}
+#pair-qr{display:block;width:min(280px,100%);height:auto;margin:16px auto;background:white}#pair-qr[hidden]{display:none}.pair-code{font-size:22px;font-weight:bold;letter-spacing:2px}

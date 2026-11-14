@@ -214,6 +214,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(payload)
         if route == '/api/sync/session':
             return self.reply(offline_sync.profile(self))
+        if route == '/api/devices/photo':
+            from mealapp import devices
+            if not devices.enabled():return self.reply({'error':'Device pairing is unavailable.'},400)
+            return devices.staged_photo(self)
         if route == '/api/sync/bootstrap':
             return self.reply(offline_sync.bootstrap(self))
         if route == '/api/sync/pull':
@@ -221,6 +225,8 @@ class Handler(BaseHTTPRequestHandler):
                 since=int(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('since',['0'])[0])
                 if since<0: raise ValueError()
                 return self.reply(offline_sync.pull(since))
+            except hosted.HostedServiceError:
+                raise
             except ValueError:
                 return self.reply({'error':'Invalid sync cursor.'},400)
         if route == "/api/status":
@@ -262,12 +268,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        filename = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css", '/local-store.js':'local-store.js', '/local-backup.js':'local-backup.js', '/sw.js':'sw.js'}.get(route)
+        filename = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css", '/local-store.js':'local-store.js', '/local-backup.js':'local-backup.js', '/devices.js':'devices.js', '/sw.js':'sw.js'}.get(route)
         if not filename:
             return self.reply({"error": "Not found"}, 404)
         body = (PUBLIC / filename).read_bytes()
         if filename=='sw.js':
-            assets=('index.html','style.css','app.js','local-store.js','local-backup.js','sw.js')
+            assets=('index.html','style.css','app.js','local-store.js','local-backup.js','devices.js','sw.js')
             version=hashlib.sha256(b''.join((PUBLIC/name).read_bytes() for name in assets)).hexdigest()[:20]
             body=body.replace(b'__SHELL_VERSION__',version.encode())
         self.send_response(200)
@@ -315,6 +321,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object.")
                 route=urllib.parse.urlsplit(self.path).path
+                if route.startswith('/api/devices/'):
+                    from mealapp import devices
+                    return self.reply(devices.post(self,data))
                 if route == '/api/sync/push':
                     if data.get('kind')=='restore': offline_sync.validate_restore(data)
                     return self.reply(offline_sync.push(data))
@@ -325,6 +334,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = post(urllib.parse.urlsplit(self.path).path, data)
                 self.reply(result)
         except (ValueError, TypeError, KeyError) as exc:
+            if isinstance(exc,hosted.HostedServiceError):return self.reply({'error':str(exc),'code':exc.code},exc.status)
             self.reply({"error": str(exc)}, 400)
         except Exception:
             traceback.print_exc()

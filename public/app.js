@@ -82,7 +82,7 @@ function finishDialogClose(dialog) {
   if(dialog.open)return;
   dialogSessions.get(dialog)?.abort();dialogSessions.delete(dialog);
   $$('[data-dialog-feedback]',dialog).forEach(node=>node.remove());
-  $$('#recipe-message,#dish-photo-message,#replace-message,#add-week-message,#backup-message',dialog).forEach(node=>node.textContent='');
+  $$('#recipe-message,#dish-photo-message,#replace-message,#add-week-message,#backup-message,#devices-feedback,#pair-error',dialog).forEach(node=>node.textContent='');
   if(dialog.id==='recipe-modal'){clearTimeout(languageTimer);sourceLanguageVersion++;resolving.clear();}
   if($('#notification').dataset.dialog===dialog.id){clearTimeout(notifyTimer);$('#notification').hidden=true;delete $('#notification').dataset.dialog;}
   for(const entry of dialogOrigins.get(dialog)||[]){if(entry.parent.open){entry.parent.scrollTop=entry.top;entry.parent.scrollLeft=entry.left;}}
@@ -501,7 +501,7 @@ document.addEventListener('click', async event => {
   if (action === 'foods') { renderFoods(); open('#foods-modal'); }
   if (action === 'edit-food') editFood(id);
   if (action === 'clear-food') $('#food-form').reset();
-  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = '';f.elements.household_servings.value=state.settings.household_servings??''; open('#settings-modal'); await checkStatus(); }
+  if (action === 'settings') { const f = $('#settings-form'); f.dataset.version=state.versions?.settings||0; f.dataset.original=JSON.stringify(state.settings_record||null); ['text_model','vietnamese_model','english_model'].forEach(k => f.elements[k].value = state.settings[k]); f.elements.usda_api_key.value = '';f.elements.household_servings.value=state.settings.household_servings??''; open('#settings-modal'); HealthDevices.refresh(); await checkStatus(); }
   if (action === 'export') await exportBackup();
 });
 $('#recipe-form').addEventListener('submit',async event => {
@@ -537,7 +537,7 @@ $('#transcript-upload').addEventListener('change',async event=>{
       if(/\.txt$/i.test(file.name))text=await file.text();
       else{
         if(!navigator.onLine)throw new Error('Audio transcription needs a connection. Paste or upload a text transcript while offline.');
-        const response=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-App-Token':token,'X-File-Name':file.name.replace(/[^a-zA-Z0-9._-]/g,'_')},body:file,signal:task.signal});
+        const response=await fetch('/api/transcribe',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-App-Token':token,'X-Workspace-ID':state.workspace_id||'','X-Device-Epoch':state.device_epoch||'','X-File-Name':file.name.replace(/[^a-zA-Z0-9._-]/g,'_')},body:file,signal:task.signal});
         const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not transcribe this file. Paste a transcript instead.');text=data.text;
       }
       task.check();$('#recipe-form').elements.source_text.value=text;showSourceLanguage();$('#recipe-message').textContent='Transcript loaded in its original language. Review it, then click Extract recipe with AI.';
@@ -548,6 +548,7 @@ $('#transcript-upload').addEventListener('change',async event=>{
 (async () => {
   try {
     await HealthLocal.init(renderState,showSyncStatus);
+    await HealthDevices.init();
     $('#plan-vegan').checked=!!state.plan?.vegan_only;$('#plan-running').checked=!!state.plan?.prioritize_running;
     if(state.plan_job)await followPlanJob(state.plan_job);
     await checkStatus();setTimeout(resolveSavedFoods,0);
@@ -611,6 +612,8 @@ function showSyncStatus(status){
   syncConflict=status.conflict;
   $('#connection-status').textContent=`${status.online?'Online':'Offline'} · ${status.syncing?'Syncing':status.pending?`${status.error?'Sync failed ? ':''}${status.pending} change${status.pending===1?'':'s'} pending`:status.error?'Sync unavailable':'All changes synced'}`;
   $('#connection-status').title=status.error||'Changes are saved on this device before syncing.';
+  if(status.disconnected)$('#connection-status').textContent='This device has been disconnected';
+  $('#sync-now').disabled=!status.online||!!status.disconnected;
   $('#sync-conflict').hidden=!status.conflict;
 }
 $('#sync-conflict').addEventListener('click',()=>{
@@ -620,3 +623,5 @@ $('#sync-conflict').addEventListener('click',()=>{
 async function resolveSyncConflict(keep){const scope=dialogScope($('#sync-conflict-modal'));try{await HealthLocal.resolveConflict(keep);scope.check();closeDialog($('#sync-conflict-modal'));}catch(error){if(!scope.signal?.aborted)notify(error.message,true);}}
 $('#keep-local-conflict').addEventListener('click',()=>resolveSyncConflict(true));
 $('#use-server-conflict').addEventListener('click',()=>resolveSyncConflict(false));
+
+$('#sync-now').addEventListener('click',()=>HealthLocal.catchup());

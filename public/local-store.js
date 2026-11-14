@@ -6,6 +6,7 @@ const HealthLocal = (() => {
   const LOOPBACK=['127.0.0.1','localhost'].includes(location.hostname);
   const DB='health-diet-offline-v1', stores=['meta','records','outbox','photos'];
   let database, onChange=()=>{}, onStatus=()=>{}, syncing=false, timer, retry=1000, sessionAt=0, blockedIdentity=false,lastViewStamp='';
+  let live=null,liveTimer,catchRequested=false,hintCursor=0,liveGeneration=0,pairTicket=null,readInFlight=false;
   const channel=typeof BroadcastChannel==='function'?new BroadcastChannel(DB):null, urls=new Map();
   const req=request=>new Promise((resolve,reject)=>{request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
   const done=tx=>new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||new Error('Browser storage transaction failed.'));});
@@ -65,11 +66,38 @@ const HealthLocal = (() => {
   }
   function calendar(){const now=new Date(),fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,add=(d,n)=>{const copy=new Date(d);copy.setDate(copy.getDate()+n);return copy;},monday=add(now,-(now.getDay()+6)%7);return {today:fmt(now),week_start:fmt(monday),week_end:fmt(add(monday,6)),advance_limit:fmt(add(monday,56)),dates:Array.from({length:7-(now.getDay()+6)%7},(_,i)=>fmt(add(now,i)))};}
   function view(data){const map=entities(data),plans=Object.entries(map).filter(([k])=>k.startsWith('plans/')).map(([key,value])=>({...value,days:Object.entries(map).filter(([k])=>k.startsWith('meals/'+key.slice(6)+'/')).map(([,v])=>v).sort((a,b)=>a.date.localeCompare(b.date))})).sort((a,b)=>b.week_start.localeCompare(a.week_start)),cal=calendar();return {...data.meta.profile,versions:Object.fromEntries(data.records.map(r=>[r.key,r.version])),settings_record:map.settings||null,settings:{...data.meta.defaults,...map.settings},recipes:Object.entries(map).filter(([k])=>k.startsWith('recipes/')).map(([k,v])=>({...v,ingredients:v.ingredients||v.groups?.flatMap(g=>g.ingredients)||[],good_for_running:!!v.good_for_running,__version:data.records.find(r=>r.key===k)?.version||0})),foods:Object.entries(map).filter(([k])=>k.startsWith('foods/')).map(([,v])=>v),plans,plan:plans.find(p=>p.week_start===cal.week_start)||null,calendar:cal,plan_job:data.meta.planJob||null,week_expansion:Object.fromEntries(Object.entries(map).filter(([k])=>k.startsWith('expansion/')).map(([k,v])=>[k.slice(10),v]))};}
-  async function publish(){const data=await read();for(const p of data.photos)if(!urls.has(p.name))urls.set(p.name,URL.createObjectURL(p.blob));const stamp=[data.meta.profile?.uid,data.meta.cursor,data.ops.map(o=>o.id).join(','),data.photos.length,data.meta.planJob?.id,data.meta.lastPlanJob,calendar().today].join('|');if(data.meta.profile&&stamp!==lastViewStamp){lastViewStamp=stamp;onChange(view(data));}onStatus({online:navigator.onLine,syncing,pending:data.ops.length,error:data.meta.error||'',conflict:data.ops.find(x=>x.conflict)});}
+  async function publish(){const data=await read();for(const p of data.photos)if(!urls.has(p.name))urls.set(p.name,URL.createObjectURL(p.blob));const stamp=[data.meta.profile?.uid,data.meta.profile?.workspace_id,data.meta.profile?.device_epoch,data.meta.cursor,data.ops.map(o=>o.id).join(','),data.photos.length,data.meta.planJob?.id,data.meta.lastPlanJob,calendar().today].join('|');if(data.meta.profile&&stamp!==lastViewStamp){lastViewStamp=stamp;onChange(view(data));}onStatus({online:navigator.onLine,syncing,pending:data.ops.length,error:data.meta.error||'',disconnected:!!data.meta.disconnected,conflict:data.ops.find(x=>x.conflict)});}
   async function write(fn){return lock(':write',async()=>{const data=await read(),tx=(await db()).transaction(stores,'readwrite'),finished=done(tx);try{const value=fn(data,tx);await finished;channel?.postMessage('changed');await publish();return value;}catch(error){try{tx.abort();}catch{}await finished.catch(()=>{});throw error;}});}
   async function commit(changes,extra={},metadata={}){await write((data,tx)=>{if(!data.meta.profile)throw new Error('Connect once before saving on this device.');const records=Object.fromEntries(data.records.map(r=>[r.key,r])),parents={},current=entities(data,parents);changes=changes.filter(c=>!equal(current[c.key]??null,c.value)||(c.original!==undefined&&!sameOriginal(c.key,current[c.key]??null,c.original)));if(!changes.length){for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});return;}const op={id:id(),kind:'change',order:(data.meta.order||0)+1,changes:changes.map(c=>{const {original,...change}=c,provided=original!==undefined,same=provided&&sameOriginal(c.key,current[c.key]??null,original);return {...change,base:same?(records[c.key]?.version||0):(c.base??records[c.key]?.version??0),stale:provided&&!same,depends_on:parents[c.key]||null};}),...extra};if(op.changes.some(c=>c.stale))op.conflict={message:'This record changed while its editor was open. Your local edit is retained; review before syncing.'};tx.objectStore('outbox').put(op);tx.objectStore('meta').put({id:'order',value:op.order});for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});});schedule();}
-  async function request(path,body,options={}){if(blockedIdentity&&path!=='/api/sync/session')throw new Error('Server identity changed. Export your local data before resetting this workspace.');const data=await read();if(!navigator.onLine&&(!LOOPBACK||data.meta.profile?.hosted))throw new Error('You are offline. This feature needs a connection; your local edits are saved.');let response;try{response=await fetch(path,body===undefined?{cache:'no-store',signal:options.signal}:{signal:options.signal,method:'POST',headers:{'Content-Type':'application/json','X-App-Token':data.meta.profile?.token||''},body:JSON.stringify(body)});}catch(error){if(options.signal?.aborted)throw new DOMException('Dialog closed','AbortError');throw new Error('The server connection is unavailable. Local edits are saved; online features need a reachable server.');}let value;try{value=await response.json();}catch{throw new Error('The server is unavailable. Local changes remain pending.');}if(!response.ok){const e=new Error(value.error||'The server is unavailable. Local changes remain pending.');e.status=response.status;throw e;}return value;}
-  async function session(){const p=await request('/api/sync/session');await write((data,tx)=>{if(data.meta.profile&&data.meta.profile.uid!==p.uid){blockedIdentity=true;throw new Error('Your server session changed. Local data was kept and will not be sent to another tester. Export a backup before resetting this browser workspace.');}tx.objectStore('meta').put({id:'profile',value:p});});sessionAt=Date.now();}
+  async function disconnected(){closeLive();await write((data,tx)=>{tx.objectStore('meta').put({id:'disconnected',value:true});tx.objectStore('meta').put({id:'error',value:'This device has been disconnected. Local data and pending edits are kept. Rejoin with a fresh QR code.'});});}
+  async function request(path,body,options={}){
+    const pairing=path.startsWith('/api/devices/'),data=await read(),profile=data.meta.profile;
+    if(blockedIdentity&&path!=='/api/sync/session'&&!pairing)throw new Error('Server identity changed. Export your local data before resetting this workspace.');
+    if(data.meta.disconnected&&!pairing&&path!=='/api/sync/session')throw new Error('This device has been disconnected. Local edits are kept.');
+    if(!navigator.onLine&&(!LOOPBACK||profile?.hosted))throw new Error('You are offline. This feature needs a connection; your local edits are saved.');
+    const headers={'X-Workspace-ID':profile?.workspace_id||'','X-Device-Epoch':profile?.device_epoch||''};
+    if(body!==undefined)Object.assign(headers,{'Content-Type':'application/json','X-App-Token':profile?.token||''});
+    let response;try{response=await fetch(path,{cache:'no-store',signal:options.signal,headers,...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)})});}
+    catch(error){if(options.signal?.aborted)throw new DOMException('Dialog closed','AbortError');throw new Error('The server connection is unavailable. Local edits are saved; online features need a reachable server.');}
+    let value;try{value=await response.json();}catch{throw new Error('The server is unavailable. Local changes remain pending.');}
+    if(!response.ok){if(value.code==='device_disconnected')await disconnected();const e=new Error(value.error||'The server is unavailable. Local changes remain pending.');e.status=response.status;e.code=value.code;throw e;}
+    if(!pairing&&path!=='/api/sync/session'&&profile){const latest=(await read()).meta.profile;if(latest?.uid!==profile.uid||latest?.workspace_id!==profile.workspace_id||latest?.device_epoch!==profile.device_epoch)throw new Error('Workspace changed while the request was in flight. Its response was not applied.');}
+    return value;
+  }
+  const identityStamp=p=>[p?.uid,p?.workspace_id,p?.device_epoch].join('|');
+  async function session(){
+    const before=(await read()).meta.profile,p=await request('/api/sync/session');let applied=false,revoked=false;
+    await write((data,tx)=>{
+      // A pairing transaction in another tab may have replaced the local
+      // workspace while this request was in flight. Ignore its stale profile.
+      if(identityStamp(data.meta.profile)!==identityStamp(before))return;
+      if(p.active===false){revoked=true;tx.objectStore('meta').put({id:'disconnected',value:true});tx.objectStore('meta').put({id:'error',value:'This device has been disconnected. Local data and pending edits are kept. Rejoin with a fresh QR code.'});return;}
+      const old=data.meta.profile;if(old&&(old.uid!==p.uid||old.workspace_id&&old.workspace_id!==p.workspace_id||old.device_epoch&&old.device_epoch!==p.device_epoch)){blockedIdentity=true;throw new Error('Your server workspace changed. Local data and pending edits were kept. Rejoin with a fresh QR code.');}
+      tx.objectStore('meta').put({id:'profile',value:p});applied=true;
+    });
+    if(revoked){closeLive();throw new Error('This device has been disconnected.');}
+    if(applied){blockedIdentity=false;sessionAt=Date.now();}
+  }
   async function merge(result,ack=null){await write((data,tx)=>{const records=tx.objectStore('records'),queue=tx.objectStore('outbox'),old=Object.fromEntries(data.records.map(r=>[r.key,r]));for(const c of result.changes||[]){if(c.version>=(old[c.key]?.version||0))records.put(c);}
     if(ack){queue.delete(ack.id);for(const next of data.ops.filter(op=>op.order>ack.order)){
       if(next.wire)continue;
@@ -80,12 +108,70 @@ const HealthLocal = (() => {
     tx.objectStore('meta').put({id:'error',value:''});});}
   async function errorMessage(message){await write((data,tx)=>tx.objectStore('meta').put({id:'error',value:message}));}
   function schedule(delay=0){clearTimeout(timer);timer=setTimeout(sync,delay);}
-  async function sync(){if(syncing||blockedIdentity)return;const ready=await read(),local=LOOPBACK&&!ready.meta.profile?.hosted;if(syncing||!ready.meta.profile||!ready.ops.length||ready.ops[0].conflict||!navigator.onLine&&!local)return;syncing=true;await publish();try{await lock(':sync',async()=>{
+  async function catchup(cursor=0,afterSubscription=false){let data=await read();if(data.meta.pairingPending){await recoverPairing();data=await read();connectLive();}if(document.hidden||!navigator.onLine||data.meta.disconnected||data.meta.pairingPending)return;if(cursor&&(data.meta.cursor||0)>=cursor)return;hintCursor=Math.max(hintCursor,cursor);if(!cursor&&(!readInFlight||afterSubscription))catchRequested=true;schedule(25);}
+  function closeLive(){liveGeneration++;clearTimeout(liveTimer);live?.close();live=null;}
+  function watchPairing(ticket){pairTicket=ticket;closeLive();connectLive();}
+  async function connectLive(){
+    if(document.hidden||!navigator.onLine||live)return;const generation=++liveGeneration;
+    try{
+      let data=await read();if(!data.meta.profile?.hosted)return;
+      if(!pairTicket&&data.meta.pairingPending){await recoverPairing();data=await read();if(data.meta.pairingPending){liveTimer=setTimeout(connectLive,5000);return;}}
+      if(!pairTicket&&data.meta.disconnected)return;
+      if(!pairTicket&&Date.now()-sessionAt>30000)await session();data=await read();
+      if(generation!==liveGeneration||document.hidden||!data.meta.profile.pairing)return;
+      const source=new EventSource('/api/sync/events'+(pairTicket?'?pair='+encodeURIComponent(pairTicket):''));live=source;
+      source.addEventListener('ready',()=>{if(live===source){catchup(0,true);if(pairTicket)window.dispatchEvent(new Event('health-device-signal'));}});
+      source.addEventListener('change',event=>{if(live===source)catchup(JSON.parse(event.data).cursor);});
+      source.addEventListener('devices',()=>window.dispatchEvent(new Event('health-device-signal')));
+      source.addEventListener('revoked',()=>disconnected());
+      source.addEventListener('workspace',()=>{closeLive();session().then(connectLive).catch(error=>errorMessage(error.message));});
+      const retryLive=()=>{if(live!==source)return;closeLive();liveTimer=setTimeout(connectLive,5000);};
+      source.addEventListener('unavailable',retryLive);
+      source.onerror=()=>{if(source.readyState!==EventSource.CLOSED||live!==source)return;closeLive();sessionAt=0;session().then(()=>{liveTimer=setTimeout(connectLive,5000);}).catch(async error=>{await errorMessage(error.message);if(!(await read()).meta.disconnected)liveTimer=setTimeout(connectLive,5000);});};
+    }catch(error){await errorMessage(error.message);if(generation===liveGeneration)liveTimer=setTimeout(connectLive,5000);}
+  }
+  const pairCall=(action,ticket)=>request('/api/devices/pair',{action,ticket});
+  async function cancelPairing(ticket){
+    // If an activation response was lost, cancel rolls it back before old edits resume.
+    await lock(':sync',async()=>{const p=(await read()).meta.pairingPending;await pairCall(p?.ticket===ticket&&p.phase==='installed'?'finish':'cancel',ticket);await write((data,tx)=>{if(data.meta.pairingPending?.ticket===ticket)tx.objectStore('meta').delete('pairingPending');});});
+    pairTicket=null;blockedIdentity=false;sessionAt=0;schedule();connectLive();
+  }
+  async function recoverPairing(){return lock(':pairing',async()=>{const p=(await read()).meta.pairingPending;if(!p||!navigator.onLine)return;
+    try{if(p.phase==='installed'){await pairCall('finish',p.ticket);await write((data,tx)=>tx.objectStore('meta').delete('pairingPending'));pairTicket=null;blockedIdentity=false;sessionAt=0;}else await cancelPairing(p.ticket);}
+    catch(error){await errorMessage('Pairing recovery is pending. Your local data is kept. Reconnect and reopen the app. '+error.message);}
+  });}
+  async function joinPairing(ticket,signal){return lock(':pairing',()=>installPairing(ticket,signal));}
+  async function installPairing(ticket,signal){
+    const aborted=()=>{if(signal?.aborted)throw new DOMException('Pairing canceled','AbortError');};
+    closeLive();catchRequested=false;
+    await write((data,tx)=>{if(data.meta.pairingPending)throw new Error('Finish the previous pairing attempt first.');tx.objectStore('meta').put({id:'pairingPending',value:{ticket,phase:'staging',order:data.meta.order||0}});});
+    let installed=false;
+    try{
+      const snapshot=await pairCall('stage',ticket);aborted();
+      if(!snapshot||!Array.isArray(snapshot.changes)||!Number.isSafeInteger(snapshot.cursor))throw new Error('The shared data could not be validated.');
+      const names=new Set(snapshot.images||[]);for(const c of snapshot.changes)for(const m of JSON.stringify(c.value).matchAll(/\/media\/([a-f0-9]{64}\.png)/g))names.add(m[1]);
+      const photos=[];
+      for(const name of names){aborted();const response=await fetch('/api/devices/photo?ticket='+encodeURIComponent(ticket)+'&name='+encodeURIComponent(name),{cache:'no-store',signal});if(!response.ok)throw new Error('Could not download a shared photo. Existing data was kept.');const blob=await response.blob();await verifyPhoto(name,blob);photos.push({name,blob});}
+      await lock(':action',()=>lock(':sync',async()=>{
+        aborted();const before=await read();if(before.meta.order!==before.meta.pairingPending?.order&&(before.meta.order||0)!==before.meta.pairingPending?.order)throw new Error('Local data changed during pairing. Export it and try again.');
+        const activated=await pairCall('activate',ticket);aborted();
+        await write((data,tx)=>{aborted();if((data.meta.order||0)!==data.meta.pairingPending?.order)throw new Error('Local data changed. Existing data was kept.');
+          for(const name of stores)tx.objectStore(name).clear();
+          for(const c of snapshot.changes)tx.objectStore('records').put(c);
+          for(const p of photos)tx.objectStore('photos').put(p);
+          for(const [key,value] of Object.entries({profile:activated.profile,defaults:data.meta.defaults,cursor:snapshot.cursor,images:[...names],order:0,pairingPending:{ticket,phase:'installed'}}))tx.objectStore('meta').put({id:key,value});
+        });installed=true;
+      }));
+      await pairCall('finish',ticket);await write((data,tx)=>tx.objectStore('meta').delete('pairingPending'));
+      pairTicket=null;blockedIdentity=false;sessionAt=0;await publish();connectLive();schedule();
+    }catch(error){if(!installed){try{await cancelPairing(ticket);}catch{await errorMessage('Pairing canceled; reconnect to finish recovery. Your original data and pending edits are kept.');}throw error;}else{await errorMessage('Shared data is ready locally. Reconnect or use Sync now to finish pairing.');}}
+  }
+  async function sync(){if(syncing||blockedIdentity)return;const ready=await read(),local=LOOPBACK&&!ready.meta.profile?.hosted;const wants=!document.hidden&&(catchRequested||hintCursor>(ready.meta.cursor||0));if(syncing||!ready.meta.profile||ready.meta.disconnected||ready.meta.pairingPending||(!wants&&(!ready.ops.length||ready.ops[0].conflict))||!navigator.onLine&&!local)return;syncing=true;await publish();let pulling=false;try{await lock(':sync',async()=>{
     // Another tab may have drained the shared outbox while this tab waited.
-    const pending=(await read()).ops;if(!pending.length||pending[0].conflict)return;
+    const latest=await read(),pending=latest.ops;if(latest.meta.pairingPending||latest.meta.disconnected||(!catchRequested&&hintCursor<=(latest.meta.cursor||0)&&(!pending.length||pending[0].conflict)))return;
     if(Date.now()-sessionAt>30000)await session();
-    let data=await read();await merge(await request('/api/sync/pull?since='+(data.meta.cursor||0)));
-    while(navigator.onLine||local){data=await read();let op=data.ops[0];if(!op||op.conflict)break;
+    let data=await read();if(!document.hidden&&(catchRequested||hintCursor>(data.meta.cursor||0)||!data.meta.profile.pairing)){catchRequested=false;pulling=true;readInFlight=true;await merge(await request('/api/sync/pull?since='+(data.meta.cursor||0)));pulling=false;readInFlight=false;}
+    while(navigator.onLine||local){data=await read();if(data.meta.pairingPending||data.meta.disconnected)break;let op=data.ops[0];if(!op||op.conflict)break;
       if(!op.wire){await write((latest,tx)=>{const current=latest.ops.find(x=>x.id===op.id);if(!current)return;if((current.changes||[]).some(c=>c.depends_on&&!latest.ops.some(p=>p.id===c.depends_on))){current.conflict={message:'A preceding edit was discarded. Your local edit is retained; review before syncing.'};tx.objectStore('outbox').put(current);return;}current.wire=current.kind==='photo'?{id:current.id,kind:'photo',name:current.name,staged:!!current.staged,since:latest.meta.cursor||0}:current.kind==='restore'?{id:current.id,kind:'restore',base:current.base,document:current.document,since:latest.meta.cursor||0}:{id:current.id,kind:'change',since:latest.meta.cursor||0,changes:current.changes.map(change=>{const copy=clone(change);delete copy.stale;delete copy.depends_on;if(copy.key.startsWith('meals/')&&copy.value){if(copy.value.recipe?.calories)copy.value.calories=copy.value.recipe.calories;delete copy.value.recipe;}return copy;})};tx.objectStore('outbox').put(current);});op=(await read()).ops.find(x=>x.id===op.id);if(!op)continue;if(op.conflict)break;}
       let result;
       if(op.kind==='photo'){const p=data.photos.find(x=>x.name===op.name);if(!p)throw new Error('A pending image is missing. Export a backup before resetting storage.');const image=await base64(p.blob);result=await request('/api/sync/photo',{...op.wire,image});}
@@ -95,8 +181,8 @@ const HealthLocal = (() => {
       await merge(result,op);
     }
     retry=1000;
-    await downloadPhotos();
-  });}catch(error){if(error.status===403)sessionAt=0;if([400,409].includes(error.status))await write((data,tx)=>{const head=data.ops[0];if(head){head.conflict={message:error.message};tx.objectStore('outbox').put(head);}});await errorMessage(error.message);retry=Math.min(retry*2,30000);}finally{syncing=false;await publish();const remaining=(await read()).ops;if(remaining.length&&!remaining[0].conflict)schedule(retry);}}
+    if(!document.hidden)await downloadPhotos();
+  });}catch(error){if(error.status===403)sessionAt=0;if([400,409].includes(error.status))await write((data,tx)=>{const head=data.ops[0];if(head){head.conflict={message:error.message};tx.objectStore('outbox').put(head);}});catchRequested=false;hintCursor=0;await errorMessage(error.message);retry=Math.min(retry*2,30000);if(pulling&&!pairTicket&&ready.meta.profile.pairing&&!document.hidden&&!blockedIdentity&&error.code!=='device_disconnected'&&![400,409].includes(error.status)){closeLive();liveTimer=setTimeout(connectLive,retry);}}finally{readInFlight=false;syncing=false;await publish();const latest=await read();if(!latest.meta.disconnected&&!latest.meta.pairingPending){if(!document.hidden&&(catchRequested||hintCursor>(latest.meta.cursor||0))){schedule();}else if(latest.ops.length&&!latest.ops[0].conflict)schedule(retry);}}}
   async function downloadPhotos(){const data=await read(),names=new Set(Object.keys(entities(data)).filter(k=>k.startsWith('photos/')).map(k=>k.slice(7)));for(const match of JSON.stringify(entities(data)).matchAll(/\/media\/([a-f0-9]{64}\.png)/g))names.add(match[1]);for(const name of names){if(data.photos.some(p=>p.name===name))continue;const response=await fetch('/media/'+name);if(!response.ok)throw new Error('Some photos are not downloaded yet. Keep this page online to finish saving them for offline use.');const blob=await response.blob();await verifyPhoto(name,blob);await write((latest,tx)=>tx.objectStore('photos').put({name,blob}));}}
   async function verifyPhoto(name,blob){if(!/^[a-f0-9]{64}\.png$/.test(name)||blob.size>4000000)throw new Error('Invalid dish image.');const bytes=new Uint8Array(await blob.arrayBuffer()),hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');if(hash+'.png'!==name||bytes[0]!==137||bytes[1]!==80||bytes[2]!==78)throw new Error('Dish image checksum mismatch.');await checkPNG(bytes);const image=await createImageBitmap(blob);const valid=image.width===500&&image.height===500;image.close();if(!valid)throw new Error('Dish images must be 500 by 500 pixels.');}
   async function base64(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
@@ -176,7 +262,7 @@ const HealthLocal = (() => {
     if(payload.base!==undefined&&changes.length===1)changes[0].base=payload.base;if(payload.original!==undefined&&changes.length===1)changes[0].original=payload.original;
     await commit(changes,{},path==='/api/plan/result'?{planJob:data.meta.planJob?.id===payload.job_id?null:data.meta.planJob||null,lastPlanJob:payload.job_id||null,completedPlanJobs:[...(data.meta.completedPlanJobs||[]),payload.job_id].filter(Boolean).slice(-100)}:{});
   });return result;}
-  async function init(changed,status){onChange=changed;onStatus=status;await db();let data=await read();if(!data.meta.profile){const initial=await request('/api/sync/bootstrap');await write((current,tx)=>{for(const c of initial.changes)tx.objectStore('records').put(c);for(const [key,value] of Object.entries({profile:initial.profile,cursor:initial.cursor,defaults:initial.defaults,images:initial.images||[]}))tx.objectStore('meta').put({id:key,value});});}await publish();navigator.storage?.persist?.().catch(()=>{});if('serviceWorker' in navigator){await navigator.serviceWorker.register('/sw.js');await navigator.serviceWorker.ready;}downloadPhotos().catch(error=>errorMessage(error.message));schedule();}
+  async function init(changed,status){onChange=changed;onStatus=status;await db();let data=await read();if(!data.meta.profile){const initial=await request('/api/sync/bootstrap');await write((current,tx)=>{for(const c of initial.changes)tx.objectStore('records').put(c);for(const [key,value] of Object.entries({profile:initial.profile,cursor:initial.cursor,defaults:initial.defaults,images:initial.images||[]}))tx.objectStore('meta').put({id:key,value});});}await publish();navigator.storage?.persist?.().catch(()=>{});if('serviceWorker' in navigator){await navigator.serviceWorker.register('/sw.js');await navigator.serviceWorker.ready;}downloadPhotos().catch(error=>errorMessage(error.message));schedule();await recoverPairing();connectLive();}
   async function resolveConflict(keep){await write((data,tx)=>{
     const op=data.ops[0];if(!op?.conflict)return;
     const queue=tx.objectStore('outbox');
@@ -198,6 +284,6 @@ const HealthLocal = (() => {
     }
     tx.objectStore('meta').put({id:'error',value:''});
   });schedule();}
-  channel?.addEventListener('message',()=>{publish();schedule();});window.addEventListener('online',()=>{sessionAt=0;schedule();publish();downloadPhotos().catch(error=>errorMessage(error.message));});window.addEventListener('offline',()=>publish());
-  return {init,read,view,entities,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,displayAmount,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
+  channel?.addEventListener('message',()=>{publish();schedule();});window.addEventListener('online',()=>{sessionAt=0;recoverPairing().then(()=>{schedule();publish();connectLive();});});window.addEventListener('offline',()=>{closeLive();publish();});document.addEventListener('visibilitychange',()=>{if(document.hidden){catchRequested=false;closeLive();}else connectLive();});
+  return {init,read,view,entities,catchup,joinPairing,cancelPairing,connectLive,watchPairing,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,displayAmount,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
 })();

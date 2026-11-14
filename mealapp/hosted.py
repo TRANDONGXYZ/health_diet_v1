@@ -27,6 +27,7 @@ import urllib.request
 import uuid
 
 CURRENT = ContextVar('health_tester', default=None)
+REQUEST_WORKSPACE = ContextVar('health_workspace', default=None)
 TIMINGS = ContextVar('health_request_timings', default=None)
 SESSIONS = {}
 SESSION_LOCK = threading.RLock()
@@ -91,6 +92,8 @@ def provider_error(path, status, payload):
         return HostedServiceError('Supabase could not verify this anonymous session. Check that the project URL and publishable key belong to the same project. Keep SESSION_SECRET unchanged and preserve browser cookies.', 'supabase_session_rejected')
     if status==409:
         return HostedServiceError('Data changed in another deployment. Reload and retry; the newer saved data was kept.', 'supabase_revision_conflict',409)
+    if status==400 and code=='PT400':
+        return HostedServiceError('This operation was not accepted. Reload the device list or create a fresh pairing code.','operation_rejected',400)
     return HostedServiceError('Supabase failed during '+stage.replace('_',' ')+' (HTTP '+str(status)+'). Check the matching safe error in Render Logs and the Supabase project status. No successful save was acknowledged.', 'supabase_request_failed')
 
 
@@ -107,6 +110,10 @@ def current():
 
 def owner():
     return current().uid if enabled() else None
+
+
+def workspace():
+    return (REQUEST_WORKSPACE.get() or (current().workspace_id,None))[0]
 
 
 def validate_environment():
@@ -177,6 +184,9 @@ def _remote_request(path, data=None, *, token=None, method=None, raw=False):
 class Session:
     def __init__(self, identity):
         self.uid = str(uuid.UUID(identity['uid']))
+        self.workspace_id = self.uid
+        self.device_epoch = None
+        self.device_context = {}
         self.identity = identity
         self.path = Path(tempfile.mkdtemp(prefix='health-tester-'))
         self.lock = threading.RLock()
@@ -283,7 +293,7 @@ def ensure_photo(name, *, allow_staged=False):
     with lock:
         if path.is_file():return path
         if not allow_staged and session.document_hash is not None and name not in session.image_names:return None
-        raw=remote('/storage/v1/object/authenticated/health-diet-images/'+session.uid+'/'+name,token=session.token,raw=True)
+        raw=remote('/storage/v1/object/authenticated/health-diet-images/'+workspace()+'/'+name,token=session.token,raw=True)
         if hashlib.sha256(raw).hexdigest()+'.png'!=name:raise ValueError('A saved dish image could not be verified. Please retry.')
         dish_photos.validate_png(raw)
         if not allow_staged and session.document_hash is not None and name not in session.image_names:return None
@@ -307,7 +317,7 @@ def replace_photo_manifest(names):
 def load(session):
     from . import store, dish_photos
     generation=session.cache_generation
-    rows = remote('/rest/v1/health_beta_data?select=revision,document&user_id=eq.' + session.uid, token=session.token)
+    rows = remote('/rest/v1/health_beta_data?select=revision,document&user_id=eq.' + workspace(), token=session.token)
     document = rows[0]['document'] if rows else None
     session.revision = rows[0]['revision'] if rows else 0
     session.document = document
@@ -363,7 +373,7 @@ def persist():
     known = session.image_names
     for path in files:
         if path.name not in known:
-            remote('/storage/v1/object/health-diet-images/' + session.uid + '/' + path.name, path.read_bytes(), token=session.token, method='POST', raw=True)
+            remote('/storage/v1/object/health-diet-images/' + workspace() + '/' + path.name, path.read_bytes(), token=session.token, method='POST', raw=True)
     result = remote('/rest/v1/rpc/health_beta_save', {'expected_revision':session.revision, 'new_document':document}, token=session.token)
     session.revision = result
     session.document_hash=digest
@@ -440,12 +450,12 @@ def serve(handler, callback):
         return handler.reply({'ok':True, 'mode':'hosted'})
     if not origin_allowed(handler):
         return handler.reply({'error':'Only same-origin access is allowed.'}, 403)
-    if handler.command == 'GET' and route in ('/', '/index.html', '/app.js', '/style.css','/local-store.js','/local-backup.js','/sw.js'):
+    if handler.command == 'GET' and route in ('/', '/index.html', '/app.js', '/style.css','/local-store.js','/local-backup.js','/devices.js','/sw.js'):
         return callback()
     original = handler.wfile
     fast_delete=handler.command=='POST' and route=='/api/plan/delete'
     fast_read=handler.command=='GET' and (route in {'/api/ai-progress','/api/status','/api/plan/job'} or route.startswith('/media/'))
-    isolated=fast_delete or fast_read or route.startswith(('/api/sync/','/api/online/')) or route=='/api/transcribe'
+    isolated=fast_delete or fast_read or route.startswith(('/api/sync/','/api/online/','/api/devices/')) or route=='/api/transcribe'
     stats={}
     timing_scope=TIMINGS.set(stats)
     started=time.monotonic()
@@ -457,8 +467,17 @@ def serve(handler, callback):
         stats['identity']=(time.monotonic()-stage)*1000
         scope = CURRENT.set(session)
         try:
+            from . import devices
+            if devices.enabled():
+                pair_stream=route=='/api/sync/events' and 'pair=' in urllib.parse.urlsplit(handler.path).query
+                membership=devices.context(handler, allow_disconnected=pair_stream or route in ('/api/sync/session','/api/devices/pair','/api/devices/photo'))
+                if route == '/api/sync/events':return devices.stream(handler)
+                REQUEST_WORKSPACE.set((membership['workspace_id'],membership['device_epoch']))
+                if handler.command=='POST' and not route.startswith(('/api/sync/','/api/devices/','/api/online/')) and route!='/api/transcribe':
+                    raise HostedServiceError('This older save route is unavailable with device sync. Reload the app to use offline-first saves.','legacy_save_unavailable',409)
             stage=time.monotonic()
             with (nullcontext() if isolated else session.lock), tempfile.SpooledTemporaryFile(max_size=1024*1024) as response:
+                if devices.enabled() and not isolated:devices.check_pinned(handler)
                 stats['lock_wait']=(time.monotonic()-stage)*1000
                 stage=time.monotonic()
                 if not isolated:
@@ -469,7 +488,7 @@ def serve(handler, callback):
                 callback()
                 stats['action']=(time.monotonic()-stage)*1000
                 stage=time.monotonic()
-                if not isolated and getattr(handler, 'response_code', 500) < 400:
+                if not isolated and not devices.enabled() and getattr(handler, 'response_code', 500) < 400:
                     persist()
                 elif not isolated and handler.command=='POST':invalidate(session)
                 stats['persist']=(time.monotonic()-stage)*1000
@@ -480,6 +499,7 @@ def serve(handler, callback):
                 send_timed_response(response,original,stats)
                 if not fast_delete:session.document=None
         finally:
+            REQUEST_WORKSPACE.set(None)
             CURRENT.reset(scope)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         if session is not None:invalidate(session)

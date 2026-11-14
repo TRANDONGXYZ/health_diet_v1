@@ -6,6 +6,8 @@ For the **Render Free public beta**, see [DEPLOYMENT.md](DEPLOYMENT.md): GitHub 
 
 Manual changes now save in the browser first and sync in the background. Once loaded online, the app reopens offline on the same device. See [OFFLINE.md](OFFLINE.md) for the migration, backup behavior and verified timings. **Existing hosted deployments must run `supabase/offline.sql` before deploying this update.**
 
+**Device pairing:** Share a workspace with another browser through Settings → Connected devices, using a single-use QR and approval on the first device. Visible tabs receive live change notifications; hidden tabs catch up when reopened. See [DEVICES.md](DEVICES.md) for the new `supabase/devices.sql` migration, `DEVICE_PAIRING_ENABLED=1` rollout, device revocation and regression tests. Existing offline saves and ZIP backups remain supported.
+
 ## Start on Windows 11
 
 1. Install **Python 3.11 or newer** from [python.org](https://www.python.org/downloads/windows/). Select **Add Python to PATH**. Python 3.15 is also supported by the core app and the installed caption dependencies.

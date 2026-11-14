@@ -39,6 +39,7 @@ Enter these under Render **Environment**. Never enter the Groq key in the websit
 | Variable | Value and where to find it |
 | --- | --- |
 | `APP_MODE` | `hosted`; already set in the image and Blueprint |
+| `DEVICE_PAIRING_ENABLED` | `1` after running `supabase/devices.sql` **after** beta.sql/offline.sql. Enables QR pairing and visible-tab live sync; see [DEVICES.md](DEVICES.md). Keep unset until that migration is installed. |
 | `GROQ_API_KEY` | Create an operator key at https://console.groq.com/keys. Only the backend uses it. If absent/invalid, AI fails clearly while manual features continue to work. |
 | `SUPABASE_URL` | Project URL from the Supabase project's **Connect** dialog or **Project Settings → Data API**, such as `https://PROJECT_REF.supabase.co` |
 | `SUPABASE_PUBLISHABLE_KEY` | Project **Settings → API Keys → Publishable key** (`sb_publishable_…`). The legacy `anon` key is also accepted. **Never use a secret or service-role key.** |

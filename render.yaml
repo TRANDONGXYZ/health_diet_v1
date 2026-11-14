@@ -13,6 +13,9 @@ services:
     envVars:
       - key: APP_MODE
         value: hosted
+      # Enable only after beta.sql, offline.sql, then devices.sql are installed.
+      - key: DEVICE_PAIRING_ENABLED
+        value: "1"
       - key: GROQ_API_KEY
         sync: false
       - key: SUPABASE_URL

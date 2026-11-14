@@ -125,12 +125,15 @@ def profile(handler):
         with store.db() as c:
             local_prepare(c)
             uid = c.execute("SELECT value FROM sync_meta WHERE id='uid'").fetchone()[0]
-    return {'uid':uid, 'hosted':hosted.enabled(), 'token':hosted.csrf() if hosted.enabled() else handler.local_token}
+    from . import devices
+    return dict({'uid':uid, 'hosted':hosted.enabled(), 'token':hosted.csrf() if hosted.enabled() else handler.local_token}, **devices.profile())
 
 
 def pull(since):
     if hosted.enabled():
-        return hosted.remote('/rest/v1/rpc/health_beta_sync_pull', {'after_revision':since}, token=hosted.current().token)
+        result=hosted.remote('/rest/v1/rpc/health_beta_sync_pull', {'after_revision':since}, token=hosted.current().token)
+        remember_changes(result)
+        return result
     with store.db() as c:
         cursor = local_prepare(c)
         result = {'cursor':cursor, 'changes':[{'key':r['key'], 'value':json.loads(r['body']), 'version':r['revision']} for r in c.execute('SELECT * FROM sync_records WHERE revision>? ORDER BY revision,key',(since,))]}
@@ -138,9 +141,24 @@ def pull(since):
         return result
 
 
+def remember_changes(result):
+    """Refresh the private photo manifest from deltas, without loading a document."""
+    session=hosted.current()
+    if result.get('changes'):
+        hosted.invalidate(session)
+        session.document_hash=None
+    for change in result.get('changes',[]):
+        if change['key'].startswith('photos/'):
+            name=change['key'][7:]
+            if change['value'] is None:session.image_names.discard(name)
+            else:session.image_names.add(name)
+
+
 def bootstrap(handler):
     if hosted.enabled():
         with hosted.current().lock:
+            from . import devices
+            if devices.enabled():devices.check_pinned(handler)
             hosted.load(hosted.current())
             weekly.history()
             hosted.persist()
@@ -181,8 +199,14 @@ def apply_entities(entities, changes):
 def push(op):
     validate_operation(op)
     if hosted.enabled():
-        result = hosted.remote('/rest/v1/rpc/health_beta_sync_push', {'operation':op}, token=hosted.current().token)
-        hosted.invalidate(hosted.current())
+        from . import devices
+        name, arguments = 'health_beta_sync_push', {'operation':op}
+        if devices.enabled():
+            workspace, epoch = hosted.REQUEST_WORKSPACE.get()
+            name = 'health_beta_device_push'
+            arguments.update(expected_workspace=workspace,expected_epoch=epoch)
+        result = hosted.remote('/rest/v1/rpc/'+name, arguments, token=hosted.current().token)
+        remember_changes(result)
         return result
     with store.db() as c:
         cursor = local_prepare(c)
@@ -233,7 +257,7 @@ def save_photo(data):
     if hosted.enabled():
         session = hosted.current()
         raw = (session.path/'photos'/name).read_bytes()
-        hosted.remote('/storage/v1/object/health-diet-images/'+session.uid+'/'+name, raw, token=session.token, raw=True)
+        hosted.remote('/storage/v1/object/health-diet-images/'+hosted.workspace()+'/'+name, raw, token=session.token, raw=True)
         session.image_names.add(name)
         session.image_sizes[name] = len(raw)
     return push({'id':data['id'],'kind':'photo','name':name,'staged':staged,'size':(store.DATA/'photos'/name).stat().st_size,'since':data.get('since',0)})
