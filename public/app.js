@@ -7,7 +7,7 @@ const safeLink = v => { try { const u = new URL(v); return ['http:','https:'].in
 const fmt = n => Number.isFinite(n) ? Math.round(n).toLocaleString() : '—';
 let state = {recipes:[],foods:[],plan:null,settings:{}}, token = '', draft = null, photo = null, matches = [], busy = false, notifyTimer;
 let cameraStream = null;
-let activeTab='weekly',tabsReady=false,detailOrigin=null,editorOrigin=null;
+let activeTab='weekly',tabsReady=false,detailOrigin=null,editorOrigin=null,detailContext=null;
 try{if(localStorage.getItem('health-diet-active-tab')==='dishes')activeTab='dishes';}catch{/* Browser preferences may be disabled. */}
 const weekPreferences=new Map(), weekExpansion=new Map();
 let expansionSaves=Promise.resolve();
@@ -63,7 +63,7 @@ async function work(label, callback, {pollAI=true}={}) {
     return await Promise.race([operation,new Promise((_,reject)=>scope.signal.addEventListener('abort',()=>reject(new DOMException('Dialog closed','AbortError')),{once:true}))]);
   }
   catch (error) { if(error.name==='AbortError'||scope.signal?.aborted)return; notify(error.message,true); if (dialog?.open) { progress.textContent = error.message; progress.classList.add('danger'); progress.dataset.persist = 'true'; } }
-  finally { polling = false; clearInterval(progressTimer); busy = false; $('#busy-indicator').hidden = true; if (!progress.dataset.persist) progress.remove(); $$('button[type=submit], [data-action=generate], [data-action=import], [data-action=identify]').forEach(b => b.disabled = false); $('#identify-button').disabled = !photo; }
+  finally { polling = false; clearInterval(progressTimer); busy = false; $('#busy-indicator').hidden = true; if (!progress.dataset.persist) progress.remove(); $$('button[type=submit], [data-action=generate], [data-action=import], [data-action=identify]').forEach(b => b.disabled = b.dataset.action==='generate'); $('#identify-button').disabled = !photo; }
 }
 let pageScrollLock=null;
 const dialogOrigins=new WeakMap();
@@ -109,6 +109,7 @@ function renderState(next){
   $('#dish-count').textContent = state.recipes.length; $('#food-count').textContent = `${state.foods.length} food references`;
   $('#food-options').innerHTML = state.foods.map(f => `<option value="${esc(f.name)}">${esc(f.name)} · ${esc(f.aliases?.join(', '))}</option>`).join('');
   renderDishes(); renderWeek();
+  refreshRecipeDialogs();
   tabsReady=true;tab(activeTab,false);
   $('#storage-label').textContent='Saved on this device · Changes sync in the background · Export backups regularly';
   $('#ai-settings').hidden=!!state.hosted;
@@ -163,7 +164,7 @@ function renderDishes() {
 }
 function dateLabel(start, offset, options) { const d = new Date(start+'T12:00:00'); d.setDate(d.getDate()+offset); return d.toLocaleDateString('en-GB',options); }
 function weekRange(start) { return dateLabel(start,0,{day:'numeric',month:'short'})+' - '+dateLabel(start,6,{day:'numeric',month:'short',year:'numeric'}); }
-function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};const original=(past||day.date<state.calendar.today?day.recipe:(state.recipes.find(r=>r.id===day.recipe_id)||day.recipe))||{id:day.recipe_id,name:'Dish unavailable',ingredients:[],notes:'The original recipe was removed before this plan was archived.',calories:{total:null,per_serving:null,complete:false,missing:['Recipe details unavailable']}};return HealthLocal.plannedRecipe(original,day.serving_plan); }
+function mealRecipe(day,past) { if(day.deleted)return {name:'Dish deleted'};const original=(state.recipes.find(r=>r.id===day.recipe_id)||day.recipe)||{id:day.recipe_id,name:'Dish unavailable',ingredients:[],notes:'The original recipe was removed before this plan was archived.',calories:{total:null,per_serving:null,complete:false,missing:['Recipe details unavailable']}};return HealthLocal.plannedRecipe(original,day.serving_plan); }
 function mealCard(day,index,plan,past) {
   if(!day.recipe_id)return `<button class="meal-card empty-meal${day.date===state.calendar.today?' is-today':''}" data-action="edit-meal" data-week="${esc(plan.week_start)}" data-day="${index}" aria-label="Add dish for ${esc(dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'long'}))}"><span class="empty-slot"><span class="slot-plus" aria-hidden="true">+</span></span><span class="meal-content"><span class="meal-date">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</span><span class="muted">Add dish</span></span></button>`;
   const r=mealRecipe(day,past),frozen=past||day.date<state.calendar.today||!state.recipes.some(item=>item.id===day.recipe_id),c=day.deleted?null:frozen?r?.calories:calculate(r||{}),isToday=day.date===state.calendar.today;
@@ -174,7 +175,7 @@ function offsetDate(start,offset){const d=new Date(start+'T12:00:00');d.setDate(
 function availableWeeks(){return Array.from({length:8},(_,i)=>offsetDate(state.calendar.week_start,7*(i+1))).filter(week=>!(state.plans||[]).some(p=>p.week_start===week));}
 function weekControls(plan) {
   const week=plan.week_start,pref=weekPreferences.get(week)||plan;
-  return `<div class="toolbar panel weekly-controls future-controls" data-week="${esc(week)}"><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="vegan_only" ${pref.vegan_only?'checked':''}> Vegan dishes only</label><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="prioritize_running" ${pref.prioritize_running?'checked':''}> Prioritize Good for Running</label><div class="spacer"></div><button class="secondary plan-control" data-action="rotation" data-week="${esc(week)}">Simple Rotation</button><button class="secondary plan-control" data-action="randomize" data-week="${esc(week)}">Randomize</button><button class="plan-control" data-action="generate" data-week="${esc(week)}">Generate with AI</button><button class="secondary" data-action="cancel-plan" data-week="${esc(week)}" hidden>Cancel</button></div><p class="inline-message" data-plan-progress data-week="${esc(week)}" role="status" hidden></p>`;
+  return `<div class="toolbar panel weekly-controls future-controls" data-week="${esc(week)}"><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="vegan_only" ${pref.vegan_only?'checked':''}> Vegan dishes only</label><label class="check"><input type="checkbox" data-week="${esc(week)}" data-pref="prioritize_running" ${pref.prioritize_running?'checked':''}> Prioritize Good for Running</label><div class="spacer"></div><button class="secondary plan-control" data-action="rotation" data-week="${esc(week)}">Simple Rotation</button><button class="secondary plan-control" data-action="randomize" data-week="${esc(week)}">Randomize</button><button class="plan-control" data-action="generate" data-week="${esc(week)}" disabled title="AI meal generation is temporarily disabled">Generate with AI</button><button class="secondary" data-action="cancel-plan" data-week="${esc(week)}" hidden>Cancel</button></div><p class="inline-message" data-plan-progress data-week="${esc(week)}" role="status" hidden></p>`;
 }
 function weekIsExpanded(week){return week===state.calendar.week_start?true:(state.week_expansion?.[week]??true);}
 function renderWeek() {
@@ -211,14 +212,15 @@ async function createWeek(){
   catch(error){if(!scope.signal?.aborted)$('#add-week-message').textContent=error.message;}
   finally{weekMutationPending=false;button.disabled=false;if($('#add-week-modal').open)button.focus({preventScroll:true});}
 }
-function showMeal(week,index) {
+function showMeal(week,index,rememberOrigin=true) {
   const plan=(state.plans||[]).find(p=>p.week_start===week);const day=plan?.days[index];if(!day)return;
-  detailOrigin=editorLocation(week,index);
+  if(rememberOrigin)detailOrigin=editorLocation(week,index);detailContext={week,date:day.date};
   if(day.deleted){detailEdit(null);$('#dish-detail').innerHTML=`<article class="recipe-detail"><h2>Dish deleted</h2><p class="dish-meta">${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</p></article>`;open('#detail-modal');return;}
   const past=week<state.calendar.week_start,r=mealRecipe(day,past);if(!r){notify('This dish is unavailable.',true);return;}
   const linked=state.recipes.find(item=>item.id===day.recipe_id),frozen=past||day.date<state.calendar.today||!linked;detailEdit(linked?.id);
   const portion=day.serving_plan,servings=portion?`<p class="footnote" id="meal-servings">${portion.servings?'Planned meal: '+portion.servings+' servings':'Planned servings not set'} · ${portion.recipe_servings?'Original recipe: '+portion.recipe_servings+' servings':'Original recipe yield not stated'}.${!portion.servings||!portion.recipe_servings?' Quantities kept as written in the original recipe.':''}</p>`:'';
-  $('#dish-detail').innerHTML=(past?'<p class="footnote">Past week - saved dish details.</p>':'')+servings+detailsMarkup(r,frozen)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`;
+  const scaled=!!(portion?.servings&&portion.recipe_servings);
+  $('#dish-detail').innerHTML=servings+detailsMarkup(r,frozen,scaled)+`<h3>Preparation for ${dateLabel(day.date,0,{weekday:'long',day:'numeric',month:'short'})}</h3><p>${esc(day.prep)}</p><p>${day.timing==='night before'?'Cook the night before.':'Cook fresh in the morning.'} ${esc(day.reason)}</p>`;
   open('#detail-modal');
 }
 function runningPill(recipe) { return recipe.good_for_running ? '<span class="pill">Good for Running</span>' : ''; }
@@ -288,17 +290,17 @@ async function resolveIngredient(name) {
   } catch (e) { if(!scope.signal?.aborted)$('#recipe-message').textContent = e.message; }
   finally { resolving.delete(name); }
 }
-function detailsMarkup(r, frozen=false) {
-  return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2></div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(displayPhoto(r.photo_url))}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
+function detailsMarkup(r, frozen=false,scaled=false) {
+  return `<article class="recipe-detail"><div class="detail-heading"><h2>${esc(r.name)}</h2></div>${r.photo_url?`<img class="detail-dish-photo" src="${esc(displayPhoto(r.photo_url))}" alt="${esc(r.name)}" width="500" height="500">`:''}<div class="badge-row">${veganPill(r.vegan)}${runningPill(r)}<span class="dish-meta">${r.servings?esc(r.servings)+' servings':'Servings not stated'} · ${esc(timeLabel(r))}</span></div>${r.source_url?`<p class="source-link"><a href="${safeLink(r.source_url)}" target="_blank" rel="noopener noreferrer">View original source ↗</a></p>`:''}<div class="calorie-summary">${calorieMarkup(r,frozen)}</div><section class="detail-ingredients"><h3>Ingredients</h3><ul>${r.ingredients.map(item=>`<li>${esc(item.name)} — ${esc(scaled?HealthLocal.scaleQuantity(item.quantity||'',1,true):item.quantity||'')}${item.quantity&&item.grams!=null?' · ':''}${item.grams!=null?`${item.weight_estimated?'~':''}${scaled?HealthLocal.displayAmount(item.grams):item.grams} g`:' (weight unknown)'}${item.weight_estimated?' (estimated)':''}</li>`).join('')}</ul></section>${r.ingredients.some(i=>i.source_quote)?`<details><summary>Source evidence</summary><ul>${r.ingredients.filter(i=>i.source_quote).map(i=>`<li>${esc(i.source_quote)}</li>`).join('')}</ul></details>`:''}${r.notes?`<h3 class="compact">Notes</h3><p class="inline-message">${esc(r.notes)}</p>`:''}</article>`;
 }
 function detailEdit(id){const button=$('#detail-edit');button.hidden=!id;button.dataset.id=id||'';}
-function showDetails(id) { const r = state.recipes.find(r => r.id === id); if (!r) return; detailOrigin=editorLocation();$('#dish-detail').innerHTML = detailsMarkup(r); detailEdit(r.id);open('#detail-modal'); }
+function showDetails(id,rememberOrigin=true) { const r = state.recipes.find(r => r.id === id); if (!r) return; if(rememberOrigin)detailOrigin=editorLocation();detailContext={id};$('#dish-detail').innerHTML = detailsMarkup(r); detailEdit(r.id);open('#detail-modal'); }
 let planJobId=null,planJobWeek=null,pendingPlanWeek=null,planPollTimer=null, planPollPending=false, requestedPlanCancel=false;
 function jobWeek(){return planJobWeek||pendingPlanWeek||state.calendar?.week_start;}
 function planProgress(message){$$('[data-plan-progress]').forEach(node=>{if(node.dataset.week===jobWeek())node.textContent=message;});}
 function cancelDisabled(value){$$('[data-action=cancel-plan]').forEach(button=>button.disabled=value);}
 function setPlanBusy(active) {
-  $$('.plan-control').forEach(button=>button.disabled=active);
+  $$('.plan-control').forEach(button=>button.disabled=active||button.dataset.action==='generate');
   $$('input[data-pref],[data-action=edit-meal],[data-action=delete-week]').forEach(node=>node.disabled=active&&node.dataset.week===jobWeek());
   $$('[data-action=cancel-plan],[data-plan-progress]').forEach(node=>{node.hidden=!(active&&node.dataset.week===jobWeek());});
 }
@@ -332,6 +334,7 @@ async function followPlanJob(job) {
   clearInterval(planPollTimer);planPollTimer=setInterval(pollPlanJob,800);pollPlanJob();
 }
 async function generate(method='AI',week=state.calendar.week_start) {
+  if(method==='AI'){notify('AI meal generation is temporarily disabled. Use Simple Rotation or Randomize.');return;}
   if(planJobId||busy){notify('Wait for the current task or cancel AI generation.');return;}
   const panel=week===state.calendar.week_start?$('#weekly>.weekly-controls'):$(`.future-controls[data-week="${week}"]`);
   const data={method,week_start:week,timezone_offset:new Date().getTimezoneOffset(),vegan_only:$('input[data-pref=vegan_only]',panel).checked,prioritize_running:$('input[data-pref=prioritize_running]',panel).checked};
@@ -371,6 +374,24 @@ function selectReplacement(id) {
   replacement.recipeId=id;renderReplacementList();$('#replace-modal').classList.add('expanded');
   $('#replacement-details').hidden=false;$('#replacement-details').innerHTML=detailsMarkup(recipe,true);$('#replace-confirm').disabled=false;
   $('#replacement-details').scrollTop=0;
+}
+function refreshRecipeDialogs(){
+  if($('#detail-modal').open&&detailContext){
+    const top=$('#dish-detail').scrollTop,context=detailContext;
+    if(context.week){const index=state.plans.find(p=>p.week_start===context.week)?.days.findIndex(d=>d.date===context.date);if(index>=0)showMeal(context.week,index,false);}
+    else if(state.recipes.some(r=>r.id===context.id))showDetails(context.id,false);
+    else{$('#dish-detail').innerHTML='<article class="recipe-detail"><h2>Dish deleted</h2></article>';detailEdit(null);}
+    $('#dish-detail').scrollTop=top;
+  }
+  if($('#replace-modal').open&&replacement&&!weekMutationPending){
+    const left=$('#replace-list').scrollTop,right=$('#replacement-details').scrollTop;
+    renderReplacementList();
+    if(replacement.recipeId){
+      if(state.recipes.some(r=>r.id===replacement.recipeId))selectReplacement(replacement.recipeId);
+      else{replacement.recipeId=null;$('#replace-confirm').disabled=true;$('#replacement-details').innerHTML='<h2>Dish deleted</h2>';}
+    }
+    $('#replace-list').scrollTop=left;$('#replacement-details').scrollTop=right;
+  }
 }
 document.addEventListener('keydown',event=>{
   if(event.key!=='/'||event.ctrlKey||event.metaKey||event.altKey||event.isComposing||!$('#replace-modal').open||$$('dialog[open]').at(-1)!==$('#replace-modal'))return;

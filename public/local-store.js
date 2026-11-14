@@ -27,6 +27,13 @@ const HealthLocal = (() => {
     if(count!==expected)fail();
   }
   function equal(a,b){if(a===b)return true;if(!a||!b||typeof a!=='object'||typeof b!=='object'||Array.isArray(a)!==Array.isArray(b))return false;const keys=Object.keys(a).filter(k=>!k.startsWith('__')).sort(),other=Object.keys(b).filter(k=>!k.startsWith('__')).sort();return keys.length===other.length&&keys.every((key,i)=>key===other[i]&&equal(a[key],b[key]));}
+  function sameOriginal(key,a,b){
+    if(!key.startsWith('meals/')||!a||!b)return equal(a,b);
+    // Recipe projections can refresh while the picker is open without changing
+    // the assignment itself. Still detect changes to dates, choices and servings.
+    const assignment=value=>{const {recipe,calories,serving_plan,...saved}=value;return serving_plan?{...saved,serving_plan:{servings:serving_plan.servings}}:saved;};
+    return equal(assignment(a),assignment(b));
+  }
   async function db(){if(database)return database;database=await new Promise((resolve,reject)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>stores.forEach(name=>r.result.createObjectStore(name,{keyPath:name==='records'?'key':name==='photos'?'name':'id'}));r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);r.onblocked=()=>reject(new Error('Close older app tabs to update browser storage.'));});return database;}
   async function read(){const tx=(await db()).transaction(stores,'readonly'),finished=done(tx);const [meta,records,ops,photos]=await Promise.all(stores.map(name=>req(tx.objectStore(name).getAll())));await finished;return {meta:Object.fromEntries(meta.map(x=>[x.id,x.value])),records,ops:ops.sort((a,b)=>a.order-b.order),photos};}
   function cascade(map,changes){
@@ -39,12 +46,28 @@ const HealthLocal = (() => {
     }
     return touched;
   }
-  function entities(data,parents={}){let map=Object.fromEntries(data.records.filter(x=>x.value!==null).map(x=>[x.key,clone(x.value)]));for(const op of data.ops){let touched;if(op.kind==='restore'){const next=clone(op.entities);touched=new Set([...Object.keys(map),...Object.keys(next)]);map=next;}else if(op.kind==='photo'){const key='photos/'+op.name;map[key]={name:op.name};touched=new Set([key]);}else touched=cascade(map,op.changes);for(const key of touched)parents[key]=op.id;}return map;}
+  function entities(data,parents={}){let map=Object.fromEntries(data.records.filter(x=>x.value!==null).map(x=>[x.key,clone(x.value)]));for(const op of data.ops){let touched;if(op.kind==='restore'){const next=clone(op.entities);touched=new Set([...Object.keys(map),...Object.keys(next)]);map=next;}else if(op.kind==='photo'){const key='photos/'+op.name;map[key]={name:op.name};touched=new Set([key]);}else touched=cascade(map,op.changes);for(const key of touched)parents[key]=op.id;}return refreshLinkedMeals(map);}
+  function refreshLinkedMeals(map){
+    // Linked meals are projections of the latest recipe, not independent copies.
+    // Only the recipe operation needs syncing; dates and saved serving counts stay put.
+    // Use the same defaults as the editor when comparing older saved recipes.
+    for(const [key,r] of Object.entries(map))if(key.startsWith('recipes/'))map[key]={...r,ingredients:r.ingredients||r.groups?.flatMap(g=>g.ingredients)||r.legacy_groups?.flatMap(g=>g.ingredients)||[],good_for_running:!!r.good_for_running};
+    const foods=Object.entries(map).filter(([key])=>key.startsWith('foods/')).map(([,food])=>food),recipes=new Map(),portions=new Map();
+    for(const [key,day] of Object.entries(map)){
+      if(!key.startsWith('meals/')||day.deleted||!day.recipe_id)continue;
+      const source=map['recipes/'+day.recipe_id];if(!source)continue;
+      if(!recipes.has(day.recipe_id))recipes.set(day.recipe_id,snapshot({...source,ingredients:source.ingredients||source.groups?.flatMap(g=>g.ingredients)||source.legacy_groups?.flatMap(g=>g.ingredients)||[]},foods));
+      const recipe=recipes.get(day.recipe_id),next={...day,recipe:clone(recipe)};
+      if(day.serving_plan){const cacheKey=JSON.stringify([day.recipe_id,day.serving_plan.servings]);if(!portions.has(cacheKey))portions.set(cacheKey,makeServingPlan(recipe,foods,day.serving_plan.servings));next.serving_plan=clone(portions.get(cacheKey));}
+      map[key]=next;
+    }
+    return map;
+  }
   function calendar(){const now=new Date(),fmt=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,add=(d,n)=>{const copy=new Date(d);copy.setDate(copy.getDate()+n);return copy;},monday=add(now,-(now.getDay()+6)%7);return {today:fmt(now),week_start:fmt(monday),week_end:fmt(add(monday,6)),advance_limit:fmt(add(monday,56)),dates:Array.from({length:7-(now.getDay()+6)%7},(_,i)=>fmt(add(now,i)))};}
   function view(data){const map=entities(data),plans=Object.entries(map).filter(([k])=>k.startsWith('plans/')).map(([key,value])=>({...value,days:Object.entries(map).filter(([k])=>k.startsWith('meals/'+key.slice(6)+'/')).map(([,v])=>v).sort((a,b)=>a.date.localeCompare(b.date))})).sort((a,b)=>b.week_start.localeCompare(a.week_start)),cal=calendar();return {...data.meta.profile,versions:Object.fromEntries(data.records.map(r=>[r.key,r.version])),settings_record:map.settings||null,settings:{...data.meta.defaults,...map.settings},recipes:Object.entries(map).filter(([k])=>k.startsWith('recipes/')).map(([k,v])=>({...v,ingredients:v.ingredients||v.groups?.flatMap(g=>g.ingredients)||[],good_for_running:!!v.good_for_running,__version:data.records.find(r=>r.key===k)?.version||0})),foods:Object.entries(map).filter(([k])=>k.startsWith('foods/')).map(([,v])=>v),plans,plan:plans.find(p=>p.week_start===cal.week_start)||null,calendar:cal,plan_job:data.meta.planJob||null,week_expansion:Object.fromEntries(Object.entries(map).filter(([k])=>k.startsWith('expansion/')).map(([k,v])=>[k.slice(10),v]))};}
   async function publish(){const data=await read();for(const p of data.photos)if(!urls.has(p.name))urls.set(p.name,URL.createObjectURL(p.blob));const stamp=[data.meta.profile?.uid,data.meta.cursor,data.ops.map(o=>o.id).join(','),data.photos.length,data.meta.planJob?.id,data.meta.lastPlanJob,calendar().today].join('|');if(data.meta.profile&&stamp!==lastViewStamp){lastViewStamp=stamp;onChange(view(data));}onStatus({online:navigator.onLine,syncing,pending:data.ops.length,error:data.meta.error||'',conflict:data.ops.find(x=>x.conflict)});}
   async function write(fn){return lock(':write',async()=>{const data=await read(),tx=(await db()).transaction(stores,'readwrite'),finished=done(tx);try{const value=fn(data,tx);await finished;channel?.postMessage('changed');await publish();return value;}catch(error){try{tx.abort();}catch{}await finished.catch(()=>{});throw error;}});}
-  async function commit(changes,extra={},metadata={}){await write((data,tx)=>{if(!data.meta.profile)throw new Error('Connect once before saving on this device.');const records=Object.fromEntries(data.records.map(r=>[r.key,r])),parents={},current=entities(data,parents);changes=changes.filter(c=>!equal(current[c.key]??null,c.value)||(c.original!==undefined&&!equal(current[c.key]??null,c.original)));if(!changes.length){for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});return;}const op={id:id(),kind:'change',order:(data.meta.order||0)+1,changes:changes.map(c=>{const {original,...change}=c,provided=original!==undefined,same=provided&&equal(current[c.key]??null,original);return {...change,base:same?(records[c.key]?.version||0):(c.base??records[c.key]?.version??0),stale:provided&&!same,depends_on:parents[c.key]||null};}),...extra};if(op.changes.some(c=>c.stale))op.conflict={message:'This record changed while its editor was open. Your local edit is retained; review before syncing.'};tx.objectStore('outbox').put(op);tx.objectStore('meta').put({id:'order',value:op.order});for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});});schedule();}
+  async function commit(changes,extra={},metadata={}){await write((data,tx)=>{if(!data.meta.profile)throw new Error('Connect once before saving on this device.');const records=Object.fromEntries(data.records.map(r=>[r.key,r])),parents={},current=entities(data,parents);changes=changes.filter(c=>!equal(current[c.key]??null,c.value)||(c.original!==undefined&&!sameOriginal(c.key,current[c.key]??null,c.original)));if(!changes.length){for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});return;}const op={id:id(),kind:'change',order:(data.meta.order||0)+1,changes:changes.map(c=>{const {original,...change}=c,provided=original!==undefined,same=provided&&sameOriginal(c.key,current[c.key]??null,original);return {...change,base:same?(records[c.key]?.version||0):(c.base??records[c.key]?.version??0),stale:provided&&!same,depends_on:parents[c.key]||null};}),...extra};if(op.changes.some(c=>c.stale))op.conflict={message:'This record changed while its editor was open. Your local edit is retained; review before syncing.'};tx.objectStore('outbox').put(op);tx.objectStore('meta').put({id:'order',value:op.order});for(const [key,value] of Object.entries(metadata))tx.objectStore('meta').put({id:key,value});});schedule();}
   async function request(path,body,options={}){if(blockedIdentity&&path!=='/api/sync/session')throw new Error('Server identity changed. Export your local data before resetting this workspace.');const data=await read();if(!navigator.onLine&&(!LOOPBACK||data.meta.profile?.hosted))throw new Error('You are offline. This feature needs a connection; your local edits are saved.');let response;try{response=await fetch(path,body===undefined?{cache:'no-store',signal:options.signal}:{signal:options.signal,method:'POST',headers:{'Content-Type':'application/json','X-App-Token':data.meta.profile?.token||''},body:JSON.stringify(body)});}catch(error){if(options.signal?.aborted)throw new DOMException('Dialog closed','AbortError');throw new Error('The server connection is unavailable. Local edits are saved; online features need a reachable server.');}let value;try{value=await response.json();}catch{throw new Error('The server is unavailable. Local changes remain pending.');}if(!response.ok){const e=new Error(value.error||'The server is unavailable. Local changes remain pending.');e.status=response.status;throw e;}return value;}
   async function session(){const p=await request('/api/sync/session');await write((data,tx)=>{if(data.meta.profile&&data.meta.profile.uid!==p.uid){blockedIdentity=true;throw new Error('Your server session changed. Local data was kept and will not be sent to another tester. Export a backup before resetting this browser workspace.');}tx.objectStore('meta').put({id:'profile',value:p});});sessionAt=Date.now();}
   async function merge(result,ack=null){await write((data,tx)=>{const records=tx.objectStore('records'),queue=tx.objectStore('outbox'),old=Object.fromEntries(data.records.map(r=>[r.key,r]));for(const c of result.changes||[]){if(c.version>=(old[c.key]?.version||0))records.put(c);}
@@ -81,9 +104,10 @@ const HealthLocal = (() => {
   function snapshot(recipe,foods){const r=clone(recipe);delete r.source_text;delete r.legacy_groups;delete r.__version;r.calories=calories(r,foods);return r;}
   const positive=value=>typeof value==='number'&&Number.isFinite(value)&&value>0;
   const validHousehold=value=>Number.isSafeInteger(value)&&value>0;
-  const rounded=value=>Number(value.toPrecision(12));
-  function scaleQuantity(text,factor){
-    if(typeof text!=='string'||factor===1||/to taste|as needed|as required|vừa (?:ăn|đủ)|tùy (?:ý|khẩu vị)/iu.test(text))return text;
+  const decimalQuantity=new Intl.NumberFormat('en-US',{minimumFractionDigits:1,maximumFractionDigits:1,useGrouping:false});
+  const displayAmount=value=>decimalQuantity.format(value);
+  function scaleQuantity(text,factor,display=false){
+    if(typeof text!=='string'||factor===1&&!display||/to taste|as needed|as required|vừa (?:ăn|đủ)|tùy (?:ý|khẩu vị)/iu.test(text))return text;
     const fractions={'¼':.25,'½':.5,'¾':.75,'⅓':1/3,'⅔':2/3,'⅛':.125,'⅜':.375,'⅝':.625,'⅞':.875};
     const pattern=/(?:\d+\s+)?\d+\s*\/\s*\d+|\d+\s*[¼½¾⅓⅔⅛⅜⅝⅞]|\d+(?:[.,]\d+)*|[¼½¾⅓⅔⅛⅜⅝⅞]/gu;
     const leading=/^(?:\s|~|≈|about\b|approximately\b|khoảng\b)*/iu.exec(text)[0].length;
@@ -93,7 +117,7 @@ const HealthLocal = (() => {
       if(raw.includes('/')){const m=/^(?:(\d+)\s+)?(\d+)\s*\/\s*(\d+)$/.exec(raw);if(!m||!Number(m[3]))return raw;value=Number(m[1]||0)+Number(m[2])/Number(m[3]);}
       else if(fractions[raw.at(-1)]!==undefined)value=Number(raw.slice(0,-1).trim()||0)+fractions[raw.at(-1)];
       else value=Number(/^\d{1,3}(?:,\d{3})+$/.test(raw)?raw.replaceAll(',',''):raw.replace(',','.'));
-      return Number.isFinite(value)?String(rounded(value*factor)):raw;
+      return Number.isFinite(value)?(display?displayAmount(value*factor):String(value*factor)):raw;
     }
     // In "2 x 400 g" or "2 cans (400 g each)", scale the count once.
     const rest=text.slice(first.index+first[0].length);
@@ -104,9 +128,9 @@ const HealthLocal = (() => {
     const servings=validHousehold(household)?household:null,recipe_servings=positive(recipe.servings)?recipe.servings:null;
     const factor=servings&&recipe_servings?servings/recipe_servings:1,c=calories(recipe,foods);
     const ingredients=clone(recipe.ingredients||[]).map(item=>{
-      if(factor!==1){if(typeof item.quantity==='string')item.quantity=scaleQuantity(item.quantity,factor);if(typeof item.grams==='number'&&Number.isFinite(item.grams))item.grams=rounded(item.grams*factor);}return item;
+      if(factor!==1){if(typeof item.quantity==='string')item.quantity=scaleQuantity(item.quantity,factor);if(typeof item.grams==='number'&&Number.isFinite(item.grams))item.grams=item.grams*factor;}return item;
     });
-    return {servings,recipe_servings,ingredients,calories:{...c,total:factor===1?c.total:rounded(c.total*factor)}};
+    return {servings,recipe_servings,ingredients,calories:{...c,total:c.total*factor}};
   }
   function plannedRecipe(recipe,plan){return plan?{...recipe,ingredients:clone(plan.ingredients),servings:plan.servings&&plan.recipe_servings?plan.servings:plan.recipe_servings,calories:clone(plan.calories)}:recipe;}
   function validateServingPlan(plan){
@@ -175,5 +199,5 @@ const HealthLocal = (() => {
     tx.objectStore('meta').put({id:'error',value:''});
   });schedule();}
   channel?.addEventListener('message',()=>{publish();schedule();});window.addEventListener('online',()=>{sessionAt=0;schedule();publish();downloadPhotos().catch(error=>errorMessage(error.message));});window.addEventListener('offline',()=>publish());
-  return {init,read,view,entities,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
+  return {init,read,view,entities,mutate,commit,request,sync,schedule,photo,verifyPhoto,base64,calendar,validHousehold,displayAmount,scaleQuantity,makeServingPlan,plannedRecipe,validateServingPlan,resolveConflict,write,id,photoURL:url=>urls.get(String(url).slice(7))||url,downloadPhotos};
 })();
